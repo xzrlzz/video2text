@@ -2,8 +2,11 @@
 
 import unittest
 
-from storyboard import Shot
-from video_generator import chunk_shots_by_max_duration, format_subject_prompt_block
+from video2text.core.storyboard import Shot
+from video2text.pipeline.generator import (
+    chunk_shots_by_max_duration,
+    format_subject_prompt_block,
+)
 
 
 class ChunkTest(unittest.TestCase):

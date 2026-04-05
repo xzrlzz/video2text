@@ -2,7 +2,7 @@
 
 import unittest
 
-from story_from_theme import _build_shots_from_theme_items
+from video2text.core.theme import _build_shots_from_theme_items
 
 
 class ThemeShotsTest(unittest.TestCase):

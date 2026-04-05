@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from config import load_config_file, load_settings
+from video2text.config.settings import load_config_file, load_settings
 
 
 class ConfigLoadTest(unittest.TestCase):

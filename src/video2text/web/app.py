@@ -1,60 +1,70 @@
 #!/usr/bin/env python3
 """
 video2text Web UI — Flask 后端：配置、任务、工作区缓存与断点续传。
-本地运行：python app.py  →  http://127.0.0.1:5000
+本地运行：v2t-web 或 python -m video2text.web.app → http://127.0.0.1:5000
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import shutil
-import subprocess
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
-from config import load_config_file, load_generation_extras, load_settings
-from story_from_theme import generate_storyboard_from_theme
-from storyboard import StoryboardDocument
-from video_analyzer import (
+from video2text.config.settings import load_generation_extras, load_settings
+from video2text.utils.paths import (
+    get_config_example_path,
+    get_default_config_path,
+    get_static_dir,
+    get_workspace_dir,
+)
+from video2text.core.analyzer import (
     analyze_full_video_local,
     analyze_full_video_url,
     analyze_scene_segments,
     consolidate_storyboard,
 )
-from video_composer import concat_videos_ffmpeg, reencode_concat
-from video_generator import (
+from video2text.core.scene_detector import build_scene_segments
+from video2text.core.storyboard import StoryboardDocument
+from video2text.core.theme import generate_next_shot, generate_storyboard_from_theme
+from video2text.pipeline.generator import (
+    CancellationError,
     assign_generation_prompts,
-    build_wan_multi_shot_prompt,
-    chunk_shots_by_max_duration,
-    download_url,
-    extract_reference_slot_bodies,
-    format_subject_prompt_block,
-    generate_video_clip,
     generation_duration_cap,
-    preflight_reference_urls_for_r2v,
     reference_subject_lock_hint,
-    select_reference_indices_for_chunk,
-    subject_block_for_chunk_refs,
+    run_storyboard_clip_generation,
 )
-from scene_detector import build_scene_segments
 
-ROOT = Path(__file__).resolve().parent
-WORKSPACE = ROOT / "workspace"
-STATIC = ROOT / "static"
-CONFIG_PATH = ROOT / "config.json"
+WORKSPACE = get_workspace_dir()
+STATIC = get_static_dir()
+CONFIG_PATH = get_default_config_path()
+CONFIG_EXAMPLE = get_config_example_path()
+
+# 任务自动清理：超过 N 天未更新的任务目录将在下次启动时清理
+TASK_TTL_DAYS = 7
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB uploads
 
 _tasks_lock = threading.Lock()
 _active_threads: dict[str, threading.Thread] = {}
+_cancel_flags: dict[str, threading.Event] = {}
 
+# SSE 事件队列：task_id -> list of subscriber queues
+_sse_queues: dict[str, list[queue.Queue]] = {}
+_sse_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -95,6 +105,18 @@ def _append_progress(task_id: str, msg: str) -> None:
         prog.append({"t": _iso_now(), "msg": msg})
         meta["progress"] = prog[-500:]
         _write_task_meta(task_id, meta)
+    # 推送 SSE 事件
+    _sse_push(task_id, {"type": "progress", "msg": msg, "t": _iso_now()})
+
+
+def _sse_push(task_id: str, event: dict[str, Any]) -> None:
+    with _sse_lock:
+        qs = _sse_queues.get(task_id, [])
+        for q in qs:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                pass
 
 
 def _mask_key(key: str) -> str:
@@ -106,9 +128,8 @@ def _mask_key(key: str) -> str:
 
 def _get_config_for_api() -> dict[str, Any]:
     if not CONFIG_PATH.is_file():
-        example = ROOT / "config.example.json"
-        if example.is_file():
-            return json.loads(example.read_text(encoding="utf-8"))
+        if CONFIG_EXAMPLE.is_file():
+            return json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
         return {}
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
@@ -119,141 +140,33 @@ def _save_config_file(data: dict[str, Any]) -> None:
     )
 
 
-def generate_clips_checkpointed(
-    task_id: str,
-    doc: StoryboardDocument,
-    settings: Any,
-    *,
-    style: str = "",
-    size: str | None = None,
-    max_segment_seconds: float,
-    subject_descriptions: list[str],
-    reference_urls: list[str],
-    reference_video_urls: list[str],
-    reference_video_descriptions: list[str],
-    progress_cb: Callable[[str], None],
-    per_chunk_reference_filter: bool = True,
-) -> Path:
-    """顺序生成各段，已存在的 seg_*.mp4 跳过；最后拼接 output.mp4。"""
-    task_d = _task_dir(task_id)
-    segments_dir = task_d / "segments"
-    segments_dir.mkdir(parents=True, exist_ok=True)
-    out_mp4 = task_d / "output.mp4"
-
-    shots = doc.shots
-    if not shots:
-        raise ValueError("分镜为空")
-
-    ref_u = [str(x).strip() for x in reference_urls if x and str(x).strip()]
-    ref_v = [str(x).strip() for x in reference_video_urls if x and str(x).strip()]
-    ref_d = [str(x).strip() for x in reference_video_descriptions if x and str(x).strip()]
-    has_refs = bool(ref_u or ref_v)
-    n_v, n_i = len(ref_v), len(ref_u)
-    v_bodies, i_bodies = extract_reference_slot_bodies(
-        subject_descriptions, ref_d, n_v, n_i
-    )
-    multi_ref = n_v + n_i > 1
-    do_filter = bool(per_chunk_reference_filter and multi_ref and has_refs)
-
-    dur_cap = generation_duration_cap(settings, has_refs)
-    max_seg_eff = max(2.0, min(float(max_segment_seconds), float(dur_cap), 15.0))
-
-    subject_block = format_subject_prompt_block(subject_descriptions)
-    ref_hint = reference_subject_lock_hint(settings, has_refs)
-    if ref_hint:
-        subject_block = (
-            f"{subject_block}。{ref_hint}" if subject_block.strip() else ref_hint
-        )
-
-    chunks = chunk_shots_by_max_duration(shots, max_seg_eff)
-    if has_refs:
-        ref_u, ref_v = preflight_reference_urls_for_r2v(settings, ref_u, ref_v)
-        if do_filter:
-            progress_cb(
-                f"参考已解析：{n_v} 视频 + {n_i} 图，共 {len(chunks)} 段；"
-                f"各段按分镜文本自动选取参考子集。"
-            )
-        else:
-            progress_cb(
-                f"参考已解析：{n_v} 视频 + {n_i} 图，共 {len(chunks)} 段待生成。"
-            )
-
-    _write_task_meta(
-        task_id,
-        {
-            "segments_total": len(chunks),
-            "segments_done": sum(
-                1
-                for p in segments_dir.glob("seg_*.mp4")
-                if p.stat().st_size > 1024
-            ),
-        },
-    )
-
-    for idx, chunk in enumerate(chunks):
-        seg_path = segments_dir / f"seg_{idx:03d}.mp4"
-        if seg_path.is_file() and seg_path.stat().st_size > 1024:
-            progress_cb(f"使用缓存片段 {idx + 1}/{len(chunks)}：{seg_path.name}")
+def _cleanup_old_tasks() -> None:
+    """清理超过 TASK_TTL_DAYS 天未更新的任务目录。"""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=TASK_TTL_DAYS)
+    if not WORKSPACE.is_dir():
+        return
+    for d in WORKSPACE.iterdir():
+        if not d.is_dir():
             continue
+        meta_path = d / "task.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            updated_str = meta.get("updated", "")
+            if updated_str:
+                updated = datetime.fromisoformat(updated_str)
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                if updated < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
-        if do_filter:
-            sv, si = select_reference_indices_for_chunk(
-                chunk,
-                n_video=n_v,
-                n_image=n_i,
-                subject_descriptions=subject_descriptions,
-                ref_video_descriptions=ref_d,
-                enabled=True,
-            )
-            sb = subject_block_for_chunk_refs(sv, si, v_bodies, i_bodies, settings)
-            cu = [ref_u[j] for j in si]
-            cv = [ref_v[j] for j in sv]
-            cd = [ref_d[j] for j in sv if j < len(ref_d)]
-        else:
-            sb = subject_block
-            cu, cv, cd = ref_u, ref_v, ref_d
-        prompt, dur = build_wan_multi_shot_prompt(
-            chunk, doc, style, sb, max_duration=dur_cap
-        )
-        sub = ""
-        if do_filter and len(cv) + len(cu) < n_v + n_i:
-            sub = f" 本段参考 {len(cv)} 视频+{len(cu)} 图。"
-        progress_cb(
-            f"生成第 {idx + 1}/{len(chunks)} 段（约 {dur}s，{len(chunk)} 镜）。{sub}".strip()
-        )
-        url = generate_video_clip(
-            prompt,
-            dur,
-            settings,
-            size=size,
-            poll_callback=None,
-            reference_urls=cu or None,
-            reference_video_urls=cv or None,
-            reference_video_description=cd or None,
-        )
-        download_url(url, seg_path)
-        done = sum(
-            1
-            for p in segments_dir.glob("seg_*.mp4")
-            if p.stat().st_size > 1024
-        )
-        _write_task_meta(task_id, {"segments_done": done})
-        progress_cb(f"第 {idx + 1} 段已保存。")
 
-    paths = sorted(segments_dir.glob("seg_*.mp4"))
-    if len(paths) != len(chunks):
-        raise RuntimeError(
-            f"片段数量不一致：期望 {len(chunks)}，实际 {len(paths)}，请删除损坏缓存后重试。"
-        )
-
-    progress_cb("正在拼接最终视频…")
-    try:
-        concat_videos_ffmpeg(paths, out_mp4)
-    except subprocess.CalledProcessError:
-        reencode_concat(paths, out_mp4)
-    progress_cb(f"完成：{out_mp4.name}")
-    return out_mp4
-
+# ---------------------------------------------------------------------------
+# 路由：静态页与配置
+# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index_page():
@@ -266,7 +179,6 @@ def api_config_get():
     safe = dict(cfg)
     if "dashscope_api_key" in safe and safe["dashscope_api_key"]:
         safe["dashscope_api_key_masked"] = _mask_key(str(safe["dashscope_api_key"]))
-        # 前端编辑时若留空 masked 则不覆盖
         if len(str(safe["dashscope_api_key"])) > 8:
             safe["dashscope_api_key"] = ""
     return jsonify(safe)
@@ -283,6 +195,10 @@ def api_config_post():
     _save_config_file(cur)
     return jsonify({"ok": True})
 
+
+# ---------------------------------------------------------------------------
+# 路由：任务管理
+# ---------------------------------------------------------------------------
 
 @app.route("/api/task/create", methods=["POST"])
 def api_task_create():
@@ -335,12 +251,46 @@ def api_upload_reference():
     return jsonify({"files": saved})
 
 
+# ---------------------------------------------------------------------------
+# 路由：preflight 配置校验
+# ---------------------------------------------------------------------------
+
+@app.route("/api/task/preflight", methods=["POST"])
+def api_task_preflight():
+    """生成前的快速配置校验，不做任何 API 调用。"""
+    body = request.get_json(force=True, silent=True) or {}
+    task_id = body.get("task_id")
+
+    issues: list[str] = []
+    cfg = _get_config_for_api()
+
+    if not cfg.get("dashscope_api_key"):
+        issues.append("未配置 dashscope_api_key，请在设置中填写")
+
+    if not cfg.get("video_gen_model") and not cfg.get("video_ref_model"):
+        issues.append("未配置视频生成模型（video_gen_model / video_ref_model）")
+
+    if task_id:
+        td = _task_dir(task_id)
+        if not (td / "storyboard.json").is_file():
+            issues.append("尚无分镜文件，请先完成步骤 1 生成分镜")
+
+    if issues:
+        return jsonify({"ok": False, "issues": issues}), 400
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# 后台任务函数
+# ---------------------------------------------------------------------------
+
 def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
     def log(m: str) -> None:
         _append_progress(task_id, m)
 
     try:
         _write_task_meta(task_id, {"status": "theme_running", "type": "theme"})
+        _sse_push(task_id, {"type": "status", "status": "theme_running"})
         log("主题分镜任务已启动，正在加载配置…")
         settings = load_settings(str(CONFIG_PATH))
         theme = (params.get("theme") or "").strip()
@@ -367,9 +317,11 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
                 "shot_count": len(doc.shots),
             },
         )
-        log(f"分镜已写入（{len(doc.shots)} 镜）。")
+        _sse_push(task_id, {"type": "status", "status": "storyboard_ready", "shot_count": len(doc.shots)})
+        log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
+        _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
         log(f"失败：{e}")
 
 
@@ -379,6 +331,7 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
 
     try:
         _write_task_meta(task_id, {"status": "analyze_running", "type": "analyze"})
+        _sse_push(task_id, {"type": "status", "status": "analyze_running"})
         log("视频分析任务已启动，正在加载配置…")
         settings = load_settings(str(CONFIG_PATH))
         td = _task_dir(task_id)
@@ -439,15 +392,19 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
                 "shot_count": len(doc.shots),
             },
         )
-        log(f"分镜已写入（{len(doc.shots)} 镜）。")
+        _sse_push(task_id, {"type": "status", "status": "storyboard_ready", "shot_count": len(doc.shots)})
+        log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
+        _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
         log(f"失败：{e}")
 
 
 def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
     def log(m: str) -> None:
         _append_progress(task_id, m)
+
+    cancel_event = _cancel_flags.get(task_id)
 
     try:
         td = _task_dir(task_id)
@@ -456,6 +413,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             raise FileNotFoundError("无 storyboard.json，请先生成分镜")
 
         _write_task_meta(task_id, {"status": "generating"})
+        _sse_push(task_id, {"type": "status", "status": "generating"})
         settings = load_settings(str(CONFIG_PATH))
         extras = load_generation_extras(str(CONFIG_PATH))
 
@@ -486,6 +444,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         )
         style = str(params.get("style") or "")
         resolution = params.get("resolution") or None
+        max_workers = int(params.get("max_workers") or 2)
 
         has_refs = bool(ref_images or ref_videos)
         dur_cap = generation_duration_cap(settings, has_refs)
@@ -508,9 +467,10 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         log(
             f"模式：{'文生 t2v' if not has_refs else '参考生 r2v ' + settings.video_ref_model}"
         )
+        log(f"并发数：{max_workers}")
 
-        generate_clips_checkpointed(
-            task_id,
+        td = _task_dir(task_id)
+        run_storyboard_clip_generation(
             doc,
             settings,
             style=style,
@@ -520,13 +480,24 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             reference_urls=ref_images,
             reference_video_urls=ref_videos,
             reference_video_descriptions=ref_video_descs,
-            progress_cb=log,
             per_chunk_reference_filter=extras.per_chunk_reference_filter,
+            progress_callback=log,
+            checkpoint_dir=td / "segments",
+            output_video=td / "output.mp4",
+            meta_update=lambda d: _write_task_meta(task_id, d),
+            max_workers=max_workers,
+            cancel_event=cancel_event,
         )
 
         _write_task_meta(task_id, {"status": "done"})
+        _sse_push(task_id, {"type": "status", "status": "done"})
+    except CancellationError:
+        _write_task_meta(task_id, {"status": "cancelled", "error": "用户已取消，已生成的片段可继续使用"})
+        _sse_push(task_id, {"type": "status", "status": "cancelled"})
+        log("任务已取消，已生成的片段缓存保留，可继续生成。")
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
+        _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
         log(f"失败：{e}")
 
 
@@ -539,14 +510,34 @@ def _spawn(name: str, target: Callable[..., None], task_id: str, params: dict) -
         finally:
             with _tasks_lock:
                 _active_threads.pop(task_id, None)
+                _cancel_flags.pop(task_id, None)
 
+    # 为每个任务创建取消标志
+    cancel_ev = threading.Event()
     t = threading.Thread(target=wrap, daemon=True, name=name)
     with _tasks_lock:
         if task_id in _active_threads:
             return False
         _active_threads[task_id] = t
+        _cancel_flags[task_id] = cancel_ev
     t.start()
     return True
+
+
+# ---------------------------------------------------------------------------
+# 路由：任务操作
+# ---------------------------------------------------------------------------
+
+@app.route("/api/task/cancel/<task_id>", methods=["POST"])
+def api_task_cancel(task_id: str):
+    """协作式取消：设置 cancel_event，当前段生成完成后停止。"""
+    with _tasks_lock:
+        ev = _cancel_flags.get(task_id)
+    if ev is None:
+        return jsonify({"error": "该任务未在运行"}), 404
+    ev.set()
+    _write_task_meta(task_id, {"cancelling": True})
+    return jsonify({"ok": True, "msg": "取消信号已发送，当前段生成完成后停止"})
 
 
 @app.route("/api/task/theme", methods=["POST"])
@@ -558,14 +549,69 @@ def api_task_theme():
     _write_task_meta(task_id, {"params": body})
     if not _spawn("theme", _run_theme_job, task_id, body):
         return (
-            jsonify(
-                {
-                    "error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试",
-                }
-            ),
+            jsonify({"error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试"}),
             409,
         )
     return jsonify({"ok": True, "task_id": task_id})
+
+
+@app.route("/api/task/theme/next", methods=["POST"])
+def api_task_theme_next():
+    """逐条续写：根据已有分镜生成下一个镜头，立即返回（同步调用，约 5-15s）。"""
+    body = request.get_json(force=True, silent=True) or {}
+    task_id = body.get("task_id")
+    if not task_id:
+        return jsonify({"error": "需要 task_id"}), 400
+
+    td = _task_dir(task_id)
+    sb_path = td / "storyboard.json"
+
+    try:
+        settings = load_settings(str(CONFIG_PATH))
+        theme = str(body.get("theme") or "")
+        style = str(body.get("style") or "")
+        model = body.get("model") or None
+
+        existing_shots: list[dict[str, Any]] = []
+        existing_title = ""
+        existing_synopsis = ""
+        existing_characters = ""
+
+        if sb_path.is_file():
+            doc_data = json.loads(sb_path.read_text(encoding="utf-8"))
+            existing_shots = doc_data.get("shots", [])
+            existing_title = doc_data.get("title", "")
+            existing_synopsis = doc_data.get("synopsis", "")
+            existing_characters = doc_data.get("characters", "")
+
+        shot = generate_next_shot(
+            theme,
+            settings,
+            existing_shots,
+            title=existing_title,
+            synopsis=existing_synopsis,
+            characters=existing_characters,
+            style_hint=style,
+            model=model,
+        )
+
+        # 追加到 storyboard.json
+        if sb_path.is_file():
+            doc = StoryboardDocument.load_json(sb_path)
+        else:
+            doc = StoryboardDocument(
+                title=existing_title,
+                synopsis=existing_synopsis,
+                characters=existing_characters,
+            )
+        doc.shots.append(shot)
+        doc.save_json(sb_path)
+        doc.save_markdown(td / "storyboard.md")
+        _write_task_meta(task_id, {"status": "storyboard_ready", "shot_count": len(doc.shots)})
+
+        return jsonify({"ok": True, "shot": shot.to_dict(), "shot_count": len(doc.shots)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/task/analyze", methods=["POST"])
@@ -606,11 +652,7 @@ def api_task_analyze():
     _write_task_meta(str(task_id), {"params": params})
     if not _spawn("analyze", _run_analyze_job, str(task_id), params):
         return (
-            jsonify(
-                {
-                    "error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试",
-                }
-            ),
+            jsonify({"error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试"}),
             409,
         )
     return jsonify({"ok": True, "task_id": task_id})
@@ -625,11 +667,7 @@ def api_task_generate():
     _write_task_meta(task_id, {"params_generate": body})
     if not _spawn("generate", _run_generate_job, task_id, body):
         return (
-            jsonify(
-                {
-                    "error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试",
-                }
-            ),
+            jsonify({"error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试"}),
             409,
         )
     return jsonify({"ok": True, "task_id": task_id})
@@ -660,12 +698,12 @@ def api_task_run():
                 "text_only_video": p.get("text_only_video"),
                 "reference_images": p.get("reference_images") or [],
                 "reference_videos": p.get("reference_videos") or [],
-                "reference_video_descriptions": p.get("reference_video_descriptions")
-                or [],
+                "reference_video_descriptions": p.get("reference_video_descriptions") or [],
                 "subject_lines": p.get("subject_lines") or [],
                 "style": p.get("style") or "",
                 "resolution": p.get("resolution"),
                 "max_segment_seconds": p.get("max_segment_seconds"),
+                "max_workers": p.get("max_workers") or 2,
             }
             _run_generate_job(tid, gen_params)
         except Exception as e:
@@ -675,15 +713,15 @@ def api_task_run():
     _write_task_meta(task_id, {"params_run": body})
     if not _spawn("run", pipeline, task_id, body):
         return (
-            jsonify(
-                {
-                    "error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试",
-                }
-            ),
+            jsonify({"error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试"}),
             409,
         )
     return jsonify({"ok": True, "task_id": task_id})
 
+
+# ---------------------------------------------------------------------------
+# 路由：任务状态与文件
+# ---------------------------------------------------------------------------
 
 @app.route("/api/task/<task_id>", methods=["GET"])
 def api_task_status(task_id: str):
@@ -705,13 +743,57 @@ def api_task_status(task_id: str):
     out_url = None
     if (td / "output.mp4").is_file():
         out_url = f"/api/files/{task_id}/output.mp4"
+    # 标记是否正在运行
+    with _tasks_lock:
+        is_running = task_id in _active_threads
     return jsonify(
         {
             **meta,
             "storyboard": storyboard,
             "segments": segments,
             "output_url": out_url,
+            "is_running": is_running,
         }
+    )
+
+
+@app.route("/api/task/stream/<task_id>", methods=["GET"])
+def api_task_stream(task_id: str):
+    """SSE 实时进度流。前端订阅此端点替代轮询。"""
+    q: queue.Queue = queue.Queue(maxsize=200)
+    with _sse_lock:
+        if task_id not in _sse_queues:
+            _sse_queues[task_id] = []
+        _sse_queues[task_id].append(q)
+
+    def generate():
+        try:
+            # 推送当前快照
+            meta = _read_task_meta(task_id)
+            if meta:
+                yield f"data: {json.dumps({'type': 'snapshot', **meta}, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    event = q.get(timeout=30)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    if event.get("type") == "status" and event.get("status") in ("done", "failed", "cancelled"):
+                        break
+                except queue.Empty:
+                    # 心跳
+                    yield ": ping\n\n"
+        finally:
+            with _sse_lock:
+                qs = _sse_queues.get(task_id, [])
+                if q in qs:
+                    qs.remove(q)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -744,6 +826,10 @@ def api_storyboard_put(task_id: str):
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# 路由：工作区管理
+# ---------------------------------------------------------------------------
+
 @app.route("/api/workspace/list", methods=["GET"])
 def api_workspace_list():
     _ensure_workspace()
@@ -774,21 +860,17 @@ def api_workspace_resume(task_id: str):
         "text_only_video": body.get("text_only_video"),
         "reference_images": body.get("reference_images") or [],
         "reference_videos": body.get("reference_videos") or [],
-        "reference_video_descriptions": body.get("reference_video_descriptions")
-        or [],
+        "reference_video_descriptions": body.get("reference_video_descriptions") or [],
         "subject_lines": body.get("subject_lines") or [],
         "style": body.get("style") or "",
         "resolution": body.get("resolution"),
         "max_segment_seconds": body.get("max_segment_seconds"),
+        "max_workers": body.get("max_workers") or 2,
     }
     _write_task_meta(task_id, {"status": "queued_generate", "params_resume": merged})
     if not _spawn("resume", _run_generate_job, task_id, merged):
         return (
-            jsonify(
-                {
-                    "error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试",
-                }
-            ),
+            jsonify({"error": "该任务已有后台作业在执行，请等待完成或换一个新任务后再试"}),
             409,
         )
     return jsonify({"ok": True})
@@ -806,15 +888,35 @@ def api_clear_segments(task_id: str):
     return jsonify({"ok": True})
 
 
+@app.route("/api/workspace/delete/<task_id>", methods=["DELETE"])
+def api_workspace_delete(task_id: str):
+    """删除整个任务目录（不可恢复）。"""
+    td = _task_dir(task_id)
+    if not td.is_dir():
+        return jsonify({"error": "任务不存在"}), 404
+    with _tasks_lock:
+        if task_id in _active_threads:
+            return jsonify({"error": "任务正在运行，请先取消再删除"}), 409
+    shutil.rmtree(td, ignore_errors=True)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# 启动
+# ---------------------------------------------------------------------------
+
 def _ensure_config_file() -> None:
-    if not CONFIG_PATH.is_file():
-        example = ROOT / "config.example.json"
-        if example.is_file():
-            CONFIG_PATH.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    if not CONFIG_PATH.is_file() and CONFIG_EXAMPLE.is_file():
+        CONFIG_PATH.write_text(CONFIG_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def main() -> None:
+    _ensure_workspace()
+    _ensure_config_file()
+    _cleanup_old_tasks()
+    print("video2text Web UI: http://127.0.0.1:5000")
+    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
-    _ensure_workspace()
-    _ensure_config_file()
-    print("video2text Web UI: http://127.0.0.1:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    main()

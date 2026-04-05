@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from video2text.utils.paths import get_data_config_dir, get_project_root
+
+_FALSY = frozenset(("0", "false", "no", "off", ""))
+
 
 def _as_str_tuple(v: Any) -> tuple[str, ...]:
     if v is None:
@@ -15,12 +19,28 @@ def _as_str_tuple(v: Any) -> tuple[str, ...]:
     if isinstance(v, str):
         return (v.strip(),) if v.strip() else ()
     if isinstance(v, (list, tuple)):
-        out: list[str] = []
-        for x in v:
-            if x is not None and str(x).strip():
-                out.append(str(x).strip())
-        return tuple(out)
+        return tuple(str(x).strip() for x in v if x is not None and str(x).strip())
     return ()
+
+
+def _as_bool(v: Any, default: bool = True) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, str):
+        return v.strip().lower() not in _FALSY
+    return bool(v)
+
+
+def _as_float(v: Any, default: float, lo: float | None = None, hi: float | None = None) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if lo is not None:
+        f = max(lo, f)
+    if hi is not None:
+        f = min(hi, f)
+    return f
 
 
 @dataclass(frozen=True)
@@ -33,56 +53,21 @@ class GenerationExtras:
     reference_video_descriptions: tuple[str, ...] = ()
     max_segment_seconds: float = 15.0
     require_reference: bool = True
-    # 多参考时按每段分镜文本只传可能出镜的参考（减少串角）；单参考或无参考时无效
     per_chunk_reference_filter: bool = True
 
 
 def load_generation_extras(config_path: str | Path | None = None) -> GenerationExtras:
     cfg = load_config_file(config_path)
-    subjects = cfg.get("subject_descriptions")
-    if subjects is None:
-        subjects = cfg.get("subjects")
-    ref_u = cfg.get("reference_urls")
-    if ref_u is None:
-        ref_u = cfg.get("reference_image_urls")
-    ref_v = cfg.get("reference_video_urls")
-    ref_d = cfg.get("reference_video_descriptions")
-    max_seg = cfg.get("max_segment_seconds", 15.0)
-    try:
-        max_seg_f = float(max_seg)
-    except (TypeError, ValueError):
-        max_seg_f = 15.0
-    max_seg_f = max(2.0, min(15.0, max_seg_f))
-    if "require_reference" in cfg:
-        rr = cfg["require_reference"]
-        if isinstance(rr, str):
-            req_ref = rr.strip().lower() not in ("0", "false", "no", "off", "")
-        else:
-            req_ref = bool(rr)
-    else:
-        req_ref = True
-    if "per_chunk_reference_filter" in cfg:
-        pcrf = cfg["per_chunk_reference_filter"]
-        if isinstance(pcrf, str):
-            chunk_ref_filter = pcrf.strip().lower() not in (
-                "0",
-                "false",
-                "no",
-                "off",
-                "",
-            )
-        else:
-            chunk_ref_filter = bool(pcrf)
-    else:
-        chunk_ref_filter = True
+    subjects = cfg.get("subject_descriptions") or cfg.get("subjects")
+    ref_u = cfg.get("reference_urls") or cfg.get("reference_image_urls")
     return GenerationExtras(
         subject_descriptions=_as_str_tuple(subjects),
         reference_urls=_as_str_tuple(ref_u),
-        reference_video_urls=_as_str_tuple(ref_v),
-        reference_video_descriptions=_as_str_tuple(ref_d),
-        max_segment_seconds=max_seg_f,
-        require_reference=req_ref,
-        per_chunk_reference_filter=chunk_ref_filter,
+        reference_video_urls=_as_str_tuple(cfg.get("reference_video_urls")),
+        reference_video_descriptions=_as_str_tuple(cfg.get("reference_video_descriptions")),
+        max_segment_seconds=_as_float(cfg.get("max_segment_seconds"), 15.0, lo=2.0, hi=15.0),
+        require_reference=_as_bool(cfg.get("require_reference"), True),
+        per_chunk_reference_filter=_as_bool(cfg.get("per_chunk_reference_filter"), True),
     )
 
 
@@ -107,12 +92,13 @@ def _default_config_search_paths() -> list[Path]:
     if env:
         paths.append(Path(env).expanduser())
     paths.append(Path.cwd() / "config.json")
-    paths.append(Path(__file__).resolve().parent / "config.json")
+    paths.append(get_project_root() / "config.json")
+    paths.append(get_data_config_dir() / "config.json")
     return paths
 
 
 def load_config_file(config_path: str | Path | None) -> dict[str, Any]:
-    """Load JSON config. If path is None, use V2T_CONFIG / ./config.json / package config.json."""
+    """Load JSON config. If path is None, use V2T_CONFIG / ./config.json / project config.json."""
     if config_path is not None:
         p = Path(config_path).expanduser()
         if not p.is_file():
@@ -157,7 +143,6 @@ def _env_or_file(
 def load_settings(config_path: str | Path | None = None) -> Settings:
     """
     加载设置。密钥与端点可从 config.json 读取；同名环境变量始终覆盖配置文件。
-    默认依次查找：--config / V2T_CONFIG、当前目录 config.json、本包目录 config.json。
     """
     file_cfg = load_config_file(config_path)
 

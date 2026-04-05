@@ -9,9 +9,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
-from config import Settings
 from dashscope.utils.oss_utils import check_and_upload_local
-from ref_media_normalize import normalize_local_reference_path
+
+from video2text.config.settings import Settings
+from video2text.services.media_normalize import normalize_local_reference_path
 
 
 def video_synthesis_post_url(settings: Settings) -> str:

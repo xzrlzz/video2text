@@ -6,32 +6,28 @@ CLI：视频 analyze 或主题 theme → 分镜 JSON；generate 万相成片。
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
 import click
 
-from config import load_generation_extras, load_settings
-from scene_detector import build_scene_segments
-from story_from_theme import generate_storyboard_from_theme
-from storyboard import StoryboardDocument
-from video_analyzer import (
+from video2text.config.settings import load_generation_extras, load_settings
+from video2text.core.analyzer import (
     analyze_full_video_local,
     analyze_full_video_url,
     analyze_scene_segments,
     consolidate_storyboard,
 )
-from video_composer import concat_videos_ffmpeg, reencode_concat
-from video_generator import (
+from video2text.core.scene_detector import build_scene_segments
+from video2text.core.storyboard import StoryboardDocument
+from video2text.core.theme import generate_storyboard_from_theme
+from video2text.pipeline.generator import (
     assign_generation_prompts,
-    download_url,
-    generate_all_clips,
     generation_duration_cap,
     reference_subject_lock_hint,
+    run_storyboard_clip_generation,
 )
-from wan_video_http import uses_wan27_http
+from video2text.services.wan_video import uses_wan27_http
 
 
 def _resolve_config_path(ctx: click.Context | None) -> str | None:
@@ -274,7 +270,7 @@ def cmd_theme(
     )
     doc.save_json(out_json)
     click.echo(f"已写入 {out_json}（共 {len(doc.shots)} 镜，含对白字段 dialogue）")
-    click.echo("下一步：python video2text.py generate --storyboard ... --output ...（并准备好参考图/视频）")
+    click.echo("下一步：v2t generate --storyboard ... --output ...（并准备好参考图/视频）")
     if md_path:
         p = Path(md_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -471,65 +467,51 @@ def cmd_generate(
             encoding="utf-8",
         )
 
-    tmp = Path(tempfile.mkdtemp(prefix="v2t_gen_"))
-    try:
-        if has_refs:
-            if (
-                extras.per_chunk_reference_filter
-                and len(ref_videos_merged) + len(ref_urls_merged) > 1
-            ):
-                click.echo(
-                    f"生成模式：参考生视频，模型 {settings.video_ref_model}"
-                    f"（多参考时各段按分镜文案自动选参考子集，单次最长约 {dur_cap}s）。"
-                )
-            else:
-                click.echo(
-                    f"生成模式：参考生视频，模型 {settings.video_ref_model}"
-                    f"（每段携带同一批参考，单次最长约 {dur_cap}s）。"
-                )
+    if has_refs:
+        if (
+            extras.per_chunk_reference_filter
+            and len(ref_videos_merged) + len(ref_urls_merged) > 1
+        ):
+            click.echo(
+                f"生成模式：参考生视频，模型 {settings.video_ref_model}"
+                f"（多参考时各段按分镜文案自动选参考子集，单次最长约 {dur_cap}s）。"
+            )
         else:
             click.echo(
-                f"生成模式：文生视频，模型 {settings.video_gen_model}（无参考图/视频，主体仅靠文字，跨段一致性弱于 r2v）。"
+                f"生成模式：参考生视频，模型 {settings.video_ref_model}"
+                f"（每段携带同一批参考，单次最长约 {dur_cap}s）。"
             )
-            if subjects_merged:
-                click.echo(
-                    "提示：当前为文生模式；默认流程应为参考生。若需锁定长相/造型，请提供参考图/视频并去掉 --no-require-reference。"
-                )
-        click.echo("提交万相生成任务（可能需数分钟）…")
-
-        def _cb(msg: str) -> None:
-            click.echo(f"  {msg}")
-
-        clips = generate_all_clips(
-            doc,
-            settings,
-            style=style,
-            size=resolution,
-            max_workers=workers,
-            poll_callback=_cb,
-            max_segment_seconds=max_seg_eff,
-            subject_descriptions=subjects_merged,
-            reference_urls=ref_urls_merged,
-            reference_video_urls=ref_videos_merged,
-            reference_video_descriptions=ref_desc_merged,
-            per_chunk_reference_filter=extras.per_chunk_reference_filter,
+    else:
+        click.echo(
+            f"生成模式：文生视频，模型 {settings.video_gen_model}（无参考图/视频，主体仅靠文字，跨段一致性弱于 r2v）。"
         )
-        paths: list[Path] = []
-        for i, (url, _) in enumerate(clips):
-            seg = tmp / f"seg_{i:03d}.mp4"
-            click.echo(f"下载片段 {i+1}/{len(clips)} …")
-            download_url(url, seg)
-            paths.append(seg)
+        if subjects_merged:
+            click.echo(
+                "提示：当前为文生模式；默认流程应为参考生。若需锁定长相/造型，请提供参考图/视频并去掉 --no-require-reference。"
+            )
+    click.echo("提交万相生成任务（可能需数分钟）…")
 
-        out = Path(output)
-        try:
-            concat_videos_ffmpeg(paths, out)
-        except subprocess.CalledProcessError:
-            click.echo("流复制拼接失败，尝试重编码拼接…")
-            reencode_concat(paths, out)
-        click.echo(f"完成：{out.resolve()}")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    def _cb(msg: str) -> None:
+        click.echo(f"  {msg}")
+
+    out = run_storyboard_clip_generation(
+        doc,
+        settings,
+        style=style,
+        size=resolution,
+        max_segment_seconds=max_seg_eff,
+        subject_descriptions=subjects_merged,
+        reference_urls=ref_urls_merged,
+        reference_video_urls=ref_videos_merged,
+        reference_video_descriptions=ref_desc_merged,
+        per_chunk_reference_filter=extras.per_chunk_reference_filter,
+        progress_callback=_cb,
+        checkpoint_dir=None,
+        output_video=Path(output),
+        meta_update=None,
+        max_workers=workers,
+    )
+    click.echo(f"完成：{out.resolve()}")
 
 
 @cli.command("run")

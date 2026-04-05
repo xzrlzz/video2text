@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from storyboard import Shot, StoryboardDocument
+from video2text.core.storyboard import Shot, StoryboardDocument
 
 
 class StoryboardTest(unittest.TestCase):

@@ -10,84 +10,85 @@ from typing import Any
 
 from openai import OpenAI
 
-from config import Settings
-from scene_detector import SceneSegment
-from storyboard import Shot, StoryboardDocument
+from video2text.config.settings import Settings
+from video2text.core.scene_detector import SceneSegment
+from video2text.core.storyboard import Shot, StoryboardDocument
 
 
-DIRECTOR_SYSTEM = """你是一位世界顶级的电影导演和视觉分析专家。
-你的任务不是简单描述画面里有什么，而是拆解【参考视频】的视听语言，并将这些“电影感”元素转化为结构化的【分镜脚本】。
-你需要生成的脚本必须足够详细，能够直接作为另一个视频生成模型（如 Sora, Runway Gen-3, Kling, Seedance、通义万相等）的提示词基础。
+DIRECTOR_SYSTEM = """You are a world-class film director and visual analysis expert.
+Your task is not simply to describe what is on screen, but to deconstruct the cinematic language of the reference video and convert those filmmaking elements into a structured storyboard script.
+The script must be detailed enough to serve directly as prompt input for another video generation model (e.g. Sora, Runway Gen-3, Kling, Seedance, Wan, etc.).
 
-【重要】忽略具体角色长相与可识别面部特征（便于后续换角）；重点分析 **摄影**（景别、角度、构图、运镜与速度、光影）与 **调度**（主体在画面中的位置、动作、节奏）。
+IMPORTANT: Ignore specific facial features and identifiable appearances (to allow character replacement later). Focus on **cinematography** (shot scale, angle, composition, camera movement + speed, lighting) and **staging** (subject position in frame, action, rhythm).
 
-你必须只输出 **严格 JSON**（不要 Markdown 代码块、不要前言后语）。根对象格式如下（字段名必须完全一致，以便程序解析）：
+Output **strict JSON only** (no Markdown code blocks, no preamble or postamble). Root object format (field names must match exactly for parsing):
 
 {
   "global_summary": {
-    "core_atmosphere": "核心氛围，如：压抑的孤独感、赛博朋克喧嚣、浪漫柔光",
-    "color_palette": "色彩基调，如：青橙色调、低饱和黑白、高饱和霓虹",
-    "editing_pace": "剪辑节奏，如：快切、慢节奏长镜头"
+    "core_atmosphere": "Overall mood in English. E.g.: oppressive solitude, cyberpunk chaos, romantic soft light",
+    "color_palette": "Color grading in English. E.g.: teal-orange grade, desaturated monochrome, high-saturation neon",
+    "editing_pace": "Editing rhythm in English. E.g.: rapid cuts, slow-paced long takes"
   },
   "shots": [
     {
-      "shot_type": "景别：极远景/远景/全景/中景/近景/特写/大特写",
-      "camera_movement": "角度 + 运镜及速度（中文）。务必写清速度，如：平视，缓慢推进；俯视，快速横移",
-      "scene_description": "构图（如三分法、中心对称、引导线、框架构图）+ 空间环境与道具；不写具体五官",
-      "character_action": "该镜头内主体在做什么、表情与肢体语言（抽象描述动作与情绪，不写长相）",
-      "dialogue": "口型可读则写对白，否则空字符串",
-      "mood": "该镜头的情绪氛围",
-      "lighting": "光影，如：伦勃朗光、侧逆光、柔光、硬光、霓虹光源",
-      "audio_description": "听感/音效/配乐氛围推断（画面无声时根据画面推断）",
-      "generation_prompt": "英文单段提示词，供文生视频模型使用。公式：[shot scale + angle + camera move] + subject blocking + key action + light/mood + optional film style",
+      "shot_type": "Shot scale in English: extreme wide / wide / full / medium / close / extreme close / macro",
+      "camera_movement": "Angle + camera movement with speed, in English. E.g.: eye-level, slow push-in; overhead, fast pan left",
+      "scene_description": "Composition (rule of thirds, center symmetry, leading lines, frame-within-frame) + environment and props, in English. No specific facial features.",
+      "character_action": "What the subject is doing, expression and body language, in English. Abstract — no appearance details.",
+      "dialogue": "Write any spoken line in English if lip-readable; otherwise empty string \"\"",
+      "mood": "Emotional atmosphere in English. E.g.: melancholic, tense, euphoric, eerie",
+      "lighting": "Lighting in English. E.g.: Rembrandt lighting, soft backlight, neon rim light, hard sidelight",
+      "audio_description": "Music / sound effects / ambient sound (excluding dialogue) in English. E.g.: distant train rumble, slow piano melody",
+      "generation_prompt": "PURE ENGLISH ONLY. Single paragraph. Formula: [shot scale + angle + camera move] + subject blocking + key action + light/mood + optional film style. NO non-English characters.",
       "duration_sec": 5.0
     }
   ]
 }
 
-规则：
-- 默认应对**整支参考视频**作答：global_summary 必须体现全片层面的氛围、色彩与剪辑节奏；shots 按时间顺序覆盖全片所有镜头。
-- 若输入仅为片段（少见），仍尽量给出合理的 global_summary 与各镜描述。
-- 全片内每个独立镜头各占 shots 中一条；duration_sec 为该镜持续秒数（正数），若不确定可估算。
-- generation_prompt 必须为英文，信息密度高，便于直接投喂视频模型。"""
+Rules:
+- Analyze the **entire reference video** by default: global_summary must reflect the overall mood, color, and editing rhythm; shots must cover all cuts in chronological order.
+- If the input is a short clip, still provide a reasonable global_summary and per-shot descriptions.
+- Each distinct cut gets its own entry in shots; duration_sec is the shot duration in seconds (positive, estimate if unsure).
+- ALL text fields must be written in English. No non-English characters in any field."""
 
 
-USER_ANALYSIS_PROMPT = """【User Prompt (用户指令)】
-请分析我上传的参考视频，忽略具体的角色长相（因为我们可能换角色），重点分析 **“摄影”**和 **“调度”**。
-请严格按照以下结构完成分析，并将结果映射到系统消息规定的 JSON 字段中（每一镜的 generation_prompt 要为 AI 视频生成模型写好英文提示词）：
+USER_ANALYSIS_PROMPT = """Analyze the uploaded reference video. Ignore specific character appearances (we may replace characters later). Focus on **cinematography** and **staging**.
 
-1. **全局摘要**（写入 JSON 的 global_summary）：
-   - 核心氛围
-   - 色彩基调
-   - 剪辑节奏
+Fill in the JSON fields defined in the system prompt:
 
-2. **分镜拆解**（写入 JSON 的 shots 数组，按镜头序号）：
-   - 景别 → shot_type
-   - 构图 → 写入 scene_description 开头部分
-   - 运动（含速度）与角度 → 合并写入 camera_movement
-   - 主体动作与表情 → character_action
-   - 光影 → lighting
-   - 时长（秒）→ duration_sec
-   - AI 生成提示词（英文）→ generation_prompt
+1. **Global summary** (→ global_summary):
+   - core_atmosphere
+   - color_palette
+   - editing_pace
 
-只输出 JSON，不要其他文字。"""
+2. **Shot breakdown** (→ shots array, chronological order):
+   - shot_type
+   - composition + environment → scene_description
+   - movement (with speed) + angle → camera_movement
+   - subject action + expression → character_action
+   - lighting → lighting
+   - duration in seconds → duration_sec
+   - AI video generation prompt (English) → generation_prompt
+
+Output JSON only. ALL fields must be in English."""
 
 
-CONSOLIDATE_SYSTEM = """你是与世界顶级电影导演协作的影视编剧与统筹。输入为同一支参考视频经模型**一次性**理解后得到的分镜 JSON（含 shots 与 global_summary，或来自少数片段的合并结果）。
-请整合为一份连贯的专业说明，输出 **严格 JSON**（不要 Markdown），格式：
+CONSOLIDATE_SYSTEM = """You are a film editor and story consultant working with a world-class director. The input is a storyboard JSON extracted from a reference video (contains shots and global_summary, possibly merged from multiple segments).
+
+Consolidate into a coherent professional overview. Output **strict JSON only** (no Markdown), format:
 {
-  "title": "短片标题或暂定名",
-  "synopsis": "先用 2-4 句概括叙事走向；另起一段或并列写出全片层面的：核心氛围、色彩基调、剪辑节奏（可与各镜 mood/lighting 呼应）",
-  "characters": "主要角色与关系简述（仍避免具体长相，侧重功能与关系）",
+  "title": "Short film title or working title, in English",
+  "synopsis": "2-4 sentences summarizing the narrative arc; then describe overall: core atmosphere, color palette, editing rhythm (echoing per-shot mood/lighting). All in English.",
+  "characters": "Main characters and their relationships in English (no specific appearances — focus on role and dynamic)",
   "shot_notes": [
     {
       "shot_id": 1,
-      "refinement": "可选，统一摄影风格或补充调度细节，无则空字符串"
+      "refinement": "Optional: unified cinematography style note or staging detail for this shot, in English. Empty string if nothing to add."
     }
   ]
 }
-shot_notes 的 shot_id 必须与输入镜头顺序编号一致（从 1 递增）。
-只输出 JSON。"""
+shot_notes shot_id must match input shot order starting from 1.
+Output JSON only. ALL fields must be in English."""
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
