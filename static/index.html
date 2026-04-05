@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>video2text · 分镜与生成</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0c0c0f;
+      --surface: #16161c;
+      --surface2: #1e1e26;
+      --border: #2a2a34;
+      --text: #e8e6f0;
+      --muted: #8b8798;
+      --primary: #7c6cf0;
+      --primary-dim: #5a4ad4;
+      --accent: #3dd6c6;
+      --danger: #f06b7c;
+      --radius: 12px;
+      --font: "DM Sans", system-ui, sans-serif;
+      --mono: "JetBrains Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 15px;
+      line-height: 1.5;
+      background-image:
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(124, 108, 240, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 50%, rgba(61, 214, 198, 0.06), transparent);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 28px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(22, 22, 28, 0.85);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 40;
+    }
+    .logo {
+      font-weight: 700;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo span { color: var(--accent); }
+    .header-actions { display: flex; gap: 10px; }
+    button, .btn {
+      font-family: var(--font);
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      padding: 10px 18px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover, .btn:hover {
+      background: #252530;
+      border-color: #3d3d4a;
+    }
+    button.primary, .btn.primary {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dim));
+      border-color: transparent;
+      color: #fff;
+    }
+    button.primary:hover { filter: brightness(1.08); }
+    button.ghost {
+      background: transparent;
+      border-color: var(--border);
+    }
+    main { max-width: 1100px; margin: 0 auto; padding: 28px 24px 80px; }
+    .task-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+      padding: 14px 18px;
+      background: var(--surface);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .task-bar code {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+      background: var(--bg);
+      padding: 4px 10px;
+      border-radius: 6px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 4px);
+      padding: 22px 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+    .card .hint { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+    .tabs button {
+      padding: 8px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: transparent;
+    }
+    .tabs button.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+    textarea, input[type="text"], input[type="password"], input[type="number"], select {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+    }
+    textarea { min-height: 120px; resize: vertical; }
+    label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      text-align: center;
+      color: var(--muted);
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .dropzone:hover, .dropzone.drag { border-color: var(--primary); background: rgba(124, 108, 240, 0.06); }
+    .ref-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+    .ref-item {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 12px;
+      background: var(--surface2);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .ref-item .thumb {
+      width: 72px;
+      height: 72px;
+      border-radius: 8px;
+      background: var(--bg);
+      object-fit: cover;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .switch input { width: 44px; height: 24px; accent-color: var(--primary); }
+    .shots { display: flex; flex-direction: column; gap: 14px; max-height: 520px; overflow-y: auto; }
+    .shot-card {
+      padding: 14px;
+      background: var(--surface2);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .shot-card header { font-weight: 600; font-size: 13px; color: var(--accent); border: none; padding: 0; position: static; background: none; }
+    .shot-card textarea { min-height: 64px; margin-top: 8px; font-size: 13px; }
+    .log {
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--bg);
+      border-radius: var(--radius);
+      padding: 14px;
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .log div { margin-bottom: 4px; }
+    .drawer-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 100;
+    }
+    .drawer-overlay.open { display: block; }
+    .drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: min(440px, 100vw);
+      height: 100vh;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      z-index: 101;
+      transform: translateX(100%);
+      transition: transform 0.25s ease;
+      overflow-y: auto;
+      padding: 24px;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer h3 { margin-top: 0; }
+    .history-item {
+      padding: 12px;
+      margin-bottom: 8px;
+      background: var(--surface2);
+      border-radius: var(--radius);
+      cursor: pointer;
+      border: 1px solid var(--border);
+    }
+    .history-item:hover { border-color: var(--primary); }
+    video { width: 100%; max-height: 420px; border-radius: var(--radius); background: #000; margin-top: 12px; }
+    .hidden { display: none !important; }
+    .flex { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">video<span>2</span>text</div>
+    <div class="header-actions">
+      <button type="button" class="ghost" id="btn-history">历史任务</button>
+      <button type="button" class="primary" id="btn-settings">设置</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="task-bar">
+      <span>当前任务</span>
+      <code id="task-id-display">（点击「新建任务」）</code>
+      <span id="task-hint" class="hint" style="flex:1;min-width:160px;"></span>
+      <button type="button" id="btn-new-task">新建任务</button>
+      <button type="button" class="ghost" id="btn-resume-ws">从列表恢复</button>
+    </div>
+
+    <!-- Step 1 -->
+    <div class="card" id="step1">
+      <h2>1 · 输入源</h2>
+      <p class="hint">主题创作或上传视频分析，生成分镜 JSON（保存在 workspace 任务目录）。</p>
+      <div class="tabs" id="source-tabs">
+        <button type="button" class="active" data-tab="theme">主题创作</button>
+        <button type="button" data-tab="analyze">视频分析</button>
+      </div>
+      <div id="panel-theme">
+        <label>故事主题 / 创意</label>
+        <textarea id="theme-text" placeholder="例如：两个陌生人在末班地铁上因一把伞相识…"></textarea>
+        <div class="row">
+          <div>
+            <label>风格（可选）</label>
+            <input type="text" id="theme-style" placeholder="如：温情、赛博朋克" />
+          </div>
+          <div>
+            <label>创作模型（可选，空则用配置）</label>
+            <input type="text" id="theme-model" placeholder="留空" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>最少镜头</label>
+            <input type="number" id="min-shots" value="8" min="3" max="40" />
+          </div>
+          <div>
+            <label>最多镜头</label>
+            <input type="number" id="max-shots" value="24" min="3" max="60" />
+          </div>
+        </div>
+        <div class="flex" style="margin-top:16px;">
+          <button type="button" class="primary" id="btn-theme">生成分镜</button>
+          <button type="button" id="btn-run-theme">一步：主题 + 生成视频</button>
+        </div>
+      </div>
+      <div id="panel-analyze" class="hidden">
+        <label>视频文件</label>
+        <div class="dropzone" id="video-drop">拖拽视频到此处或点击选择（.mp4 等）</div>
+        <input type="file" id="video-file" accept="video/*" class="hidden" />
+        <label>或 视频 URL（HTTPS）</label>
+        <input type="text" id="video-url" placeholder="https://..." />
+        <div class="row" style="margin-top:12px;">
+          <div>
+            <label>风格（可选）</label>
+            <input type="text" id="analyze-style" />
+          </div>
+          <div>
+            <label>场景切片分析</label>
+            <label class="switch"><input type="checkbox" id="segment-scenes" /> 启用 PySceneDetect 切片</label>
+          </div>
+        </div>
+        <div class="flex" style="margin-top:16px;">
+          <button type="button" class="primary" id="btn-analyze">生成分镜</button>
+          <button type="button" id="btn-run-analyze">一步：分析 + 生成视频</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="card" id="step2">
+      <h2>2 · 参考主体（参考生 r2v）</h2>
+      <p class="hint">每张图尽量单人。顺序：先视频参考（视频1…）再图片（图1…）。纯文生请打开下方开关。</p>
+      <div class="toggle-row">
+        <label class="switch">
+          <input type="checkbox" id="text-only" />
+          <span>纯文生视频（无参考，t2v）</span>
+        </label>
+      </div>
+      <div id="ref-section">
+        <label>参考视频</label>
+        <div class="dropzone" id="drop-videos" data-kind="video">拖拽或点击上传参考视频</div>
+        <input type="file" id="input-videos" class="hidden" accept="video/*" multiple />
+        <div class="ref-list" id="list-videos"></div>
+        <label style="margin-top:18px;">参考图片</label>
+        <div class="dropzone" id="drop-images" data-kind="image">拖拽或点击上传主体参考图</div>
+        <input type="file" id="input-images" class="hidden" accept="image/*" multiple />
+        <div class="ref-list" id="list-images"></div>
+      </div>
+      <div id="textonly-subject-wrap" class="hidden">
+        <label>主体文字（文生时写入每段 prompt）</label>
+        <textarea id="textonly-subjects" placeholder="每行一条，或写一段总述"></textarea>
+      </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="card" id="step3">
+      <h2>3 · 分镜预览</h2>
+      <p class="hint">可编辑对白与英文 generation_prompt，失焦自动保存到任务目录 storyboard.json。</p>
+      <div id="shots-container" class="shots"></div>
+      <p class="hint" id="shots-empty">尚无分镜，请先完成步骤 1。</p>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="card" id="step4">
+      <h2>4 · 生成视频</h2>
+      <p class="hint">分段生成会缓存到 workspace/&lt;任务&gt;/segments/，中断后可点「继续生成」复用已生成片段。</p>
+      <div class="row">
+        <div>
+          <label>生成风格（可选）</label>
+          <input type="text" id="gen-style" />
+        </div>
+        <div>
+          <label>分辨率（可选）</label>
+          <input type="text" id="gen-resolution" placeholder="1280*720" />
+        </div>
+      </div>
+      <label>切段上限（秒）</label>
+      <input type="number" id="max-seg" value="15" min="2" max="15" step="1" />
+      <div class="flex" style="margin-top:16px;">
+        <button type="button" class="primary" id="btn-generate">开始 / 继续生成</button>
+        <button type="button" class="ghost" id="btn-clear-seg">清除片段缓存重跑</button>
+      </div>
+      <label style="margin-top:16px;">进度日志</label>
+      <div class="log" id="progress-log"></div>
+      <div id="output-wrap" class="hidden">
+        <label>成片</label>
+        <video id="output-video" controls></video>
+        <a class="btn primary" id="download-link" href="#" download>下载 MP4</a>
+      </div>
+    </div>
+  </main>
+
+  <!-- Settings drawer -->
+  <div class="drawer-overlay" id="overlay-settings"></div>
+  <aside class="drawer" id="drawer-settings">
+    <h3>设置（写入 config.json）</h3>
+    <p class="hint">API Key 留空则不覆盖已有密钥。</p>
+    <label>dashscope_api_key</label>
+    <input type="password" id="cfg-key" autocomplete="off" />
+    <label>base_url</label>
+    <input type="text" id="cfg-base-url" />
+    <label>dashscope_api_base</label>
+    <input type="text" id="cfg-api-base" />
+    <label>vision_model</label>
+    <input type="text" id="cfg-vision" />
+    <label>theme_story_model</label>
+    <input type="text" id="cfg-theme-model" />
+    <label>video_gen_model</label>
+    <input type="text" id="cfg-gen" />
+    <label>video_ref_model</label>
+    <input type="text" id="cfg-ref" />
+    <label>default_resolution</label>
+    <input type="text" id="cfg-res" />
+    <label>max_video_base64_mb</label>
+    <input type="number" id="cfg-b64" step="0.1" />
+    <label>scene_detect_threshold</label>
+    <input type="number" id="cfg-thresh" step="0.1" />
+    <label>analysis_fps</label>
+    <input type="number" id="cfg-fps" step="0.1" />
+    <label>max_segment_seconds</label>
+    <input type="number" id="cfg-maxseg" step="1" />
+    <label class="switch" style="margin-top:12px;">
+      <input type="checkbox" id="cfg-req-ref" /> require_reference（默认要求参考生）
+    </label>
+    <label class="switch" style="margin-top:8px;">
+      <input type="checkbox" id="cfg-chunk-ref-filter" checked /> per_chunk_reference_filter（多参考时按分镜自动选本段参考，减少串角）
+    </label>
+    <div class="flex" style="margin-top:20px;">
+      <button type="button" class="primary" id="btn-save-config">保存配置</button>
+      <button type="button" class="ghost" id="btn-close-settings">关闭</button>
+    </div>
+  </aside>
+
+  <!-- History drawer -->
+  <div class="drawer-overlay" id="overlay-history"></div>
+  <aside class="drawer" id="drawer-history">
+    <h3>历史任务</h3>
+    <p class="hint">点击加载任务 ID，可继续生成或查看分镜。</p>
+    <div id="history-list"></div>
+    <button type="button" class="ghost" id="btn-close-history" style="margin-top:16px;">关闭</button>
+  </aside>
+
+  <script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const state = {
+    taskId: null,
+    pollTimer: null,
+    storyboard: null,
+    /** 上次已从服务端渲染进页面的分镜 JSON 指纹；轮询时仅当变化才 renderShots，避免打断选区与输入 */
+    storyboardSig: null,
+    lastOutputUrl: null,
+    videoRefs: [],
+    imageRefs: [],
+    saveShotTimer: null,
+  };
+
+  function api(path, opts = {}) {
+    return fetch(path, {
+      headers: opts.json ? { "Content-Type": "application/json" } : undefined,
+      body: opts.body ? (opts.json ? JSON.stringify(opts.body) : opts.body) : undefined,
+      method: opts.method || "GET",
+    }).then(async (r) => {
+      let data = null;
+      try {
+        data = await r.json();
+      } catch (_) {
+        data = null;
+      }
+      if (!r.ok) {
+        const msg =
+          (data && data.error) ||
+          (typeof data === "string" ? data : "") ||
+          r.statusText ||
+          `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
+      return data != null ? data : {};
+    });
+  }
+
+  function openDrawer(id) {
+    $("#overlay-" + id).classList.add("open");
+    $("#drawer-" + id).classList.add("open");
+  }
+  function closeDrawer(id) {
+    $("#overlay-" + id).classList.remove("open");
+    $("#drawer-" + id).classList.remove("open");
+  }
+
+  $("#btn-settings").onclick = () => {
+    loadConfigForm();
+    openDrawer("settings");
+  };
+  $("#overlay-settings").onclick = () => closeDrawer("settings");
+  $("#btn-close-settings").onclick = () => closeDrawer("settings");
+
+  $("#btn-history").onclick = () => {
+    refreshHistory();
+    openDrawer("history");
+  };
+  $("#overlay-history").onclick = () => closeDrawer("history");
+  $("#btn-close-history").onclick = () => closeDrawer("history");
+
+  async function loadConfigForm() {
+    const c = await api("/api/config");
+    const set = (id, v) => { const el = $("#cfg-" + id); if (el) el.value = v ?? ""; };
+    set("base-url", c.base_url);
+    set("api-base", c.dashscope_api_base);
+    set("vision", c.vision_model);
+    set("theme-model", c.theme_story_model);
+    set("gen", c.video_gen_model);
+    set("ref", c.video_ref_model);
+    set("res", c.default_resolution);
+    set("b64", c.max_video_base64_mb);
+    set("thresh", c.scene_detect_threshold);
+    set("fps", c.analysis_fps);
+    set("maxseg", c.max_segment_seconds);
+    $("#cfg-key").value = c.dashscope_api_key || "";
+    $("#cfg-req-ref").checked = !!c.require_reference;
+    const crf = $("#cfg-chunk-ref-filter");
+    if (crf) crf.checked = c.per_chunk_reference_filter !== false;
+  }
+
+  $("#btn-save-config").onclick = async () => {
+    const body = {
+      base_url: $("#cfg-base-url").value.trim(),
+      dashscope_api_base: $("#cfg-api-base").value.trim(),
+      vision_model: $("#cfg-vision").value.trim(),
+      theme_story_model: $("#cfg-theme-model").value.trim(),
+      video_gen_model: $("#cfg-gen").value.trim(),
+      video_ref_model: $("#cfg-ref").value.trim(),
+      default_resolution: $("#cfg-res").value.trim(),
+      max_video_base64_mb: parseFloat($("#cfg-b64").value) || 9,
+      scene_detect_threshold: parseFloat($("#cfg-thresh").value) || 27,
+      analysis_fps: parseFloat($("#cfg-fps").value) || 2,
+      max_segment_seconds: parseFloat($("#cfg-maxseg").value) || 15,
+      require_reference: $("#cfg-req-ref").checked,
+      per_chunk_reference_filter: $("#cfg-chunk-ref-filter").checked,
+    };
+    const k = $("#cfg-key").value.trim();
+    if (k) body.dashscope_api_key = k;
+    await api("/api/config", { method: "POST", json: true, body });
+    alert("已保存");
+    closeDrawer("settings");
+  };
+
+  $("#btn-new-task").onclick = async () => {
+    const { task_id } = await api("/api/task/create", {
+      method: "POST",
+      json: true,
+      body: {},
+    });
+    setTaskId(task_id);
+    state.videoRefs = [];
+    state.imageRefs = [];
+    state.storyboard = null;
+    state.storyboardSig = null;
+    state.lastOutputUrl = null;
+    renderRefLists();
+    $("#shots-container").innerHTML = "";
+    $("#shots-empty").classList.remove("hidden");
+    $("#output-wrap").classList.add("hidden");
+    $("#progress-log").innerHTML = "";
+  };
+
+  function setTaskId(id) {
+    state.taskId = id;
+    $("#task-id-display").textContent = id || "（无）";
+    const h = $("#task-hint");
+    if (h) h.textContent = "";
+  }
+
+  $("#source-tabs").onclick = (e) => {
+    const b = e.target.closest("button[data-tab]");
+    if (!b) return;
+    $("#source-tabs").querySelectorAll("button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    const t = b.dataset.tab;
+    $("#panel-theme").classList.toggle("hidden", t !== "theme");
+    $("#panel-analyze").classList.toggle("hidden", t !== "analyze");
+  };
+
+  $("#text-only").onchange = () => {
+    const on = $("#text-only").checked;
+    $("#ref-section").classList.toggle("hidden", on);
+    $("#textonly-subject-wrap").classList.toggle("hidden", !on);
+  };
+
+  function setupDrop(dropId, inputId, kind) {
+    const dz = $("#" + dropId);
+    const inp = $("#" + inputId);
+    dz.onclick = () => inp.click();
+    dz.ondragover = (e) => { e.preventDefault(); dz.classList.add("drag"); };
+    dz.ondragleave = () => dz.classList.remove("drag");
+    dz.ondrop = (e) => {
+      e.preventDefault();
+      dz.classList.remove("drag");
+      handleFiles(kind, e.dataTransfer.files);
+    };
+    inp.onchange = () => handleFiles(kind, inp.files);
+  }
+
+  async function handleFiles(kind, files) {
+    if (!state.taskId) {
+      alert("请先「新建任务」");
+      return;
+    }
+    if (!files || !files.length) return;
+    const fd = new FormData();
+    fd.append("task_id", state.taskId);
+    for (const f of files) fd.append("files", f);
+    const r = await fetch("/api/upload/reference", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || "上传失败"); return; }
+    for (const file of j.files) {
+      if (file.kind === "video") {
+        state.videoRefs.push({ path: file.path, desc: "" });
+      } else {
+        state.imageRefs.push({ path: file.path, subject: "" });
+      }
+    }
+    renderRefLists();
+  }
+
+  setupDrop("drop-videos", "input-videos", "video");
+  setupDrop("drop-images", "input-images", "image");
+  $("#video-drop").onclick = () => $("#video-file").click();
+  $("#video-drop").ondragover = (e) => { e.preventDefault(); $("#video-drop").classList.add("drag"); };
+  $("#video-drop").ondragleave = () => $("#video-drop").classList.remove("drag");
+  $("#video-drop").ondrop = (e) => {
+    e.preventDefault();
+    $("#video-drop").classList.remove("drag");
+    $("#video-file").files = e.dataTransfer.files;
+  };
+  $("#video-file").onchange = function () {
+    if (this.files[0]) $("#video-drop").textContent = "已选：" + this.files[0].name;
+  };
+
+  function renderRefLists() {
+    const lv = $("#list-videos");
+    lv.innerHTML = "";
+    state.videoRefs.forEach((v, i) => {
+      const div = document.createElement("div");
+      div.className = "ref-item";
+      div.innerHTML = `<div class="thumb" style="display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);">视频</div>
+        <div><strong>视频 ${i + 1}</strong><label>画面/声音说明（与 API reference_video_descriptions 对齐）</label>
+        <input type="text" data-vi="${i}" class="video-desc-inp" value="${escapeAttr(v.desc)}" placeholder="与参考视频内容对应" /></div>`;
+      lv.appendChild(div);
+    });
+    lv.querySelectorAll(".video-desc-inp").forEach((inp) => {
+      inp.oninput = () => { state.videoRefs[+inp.dataset.vi].desc = inp.value; };
+    });
+
+    const li = $("#list-images");
+    li.innerHTML = "";
+    state.imageRefs.forEach((im, j) => {
+      const div = document.createElement("div");
+      div.className = "ref-item";
+      div.innerHTML = `<div class="thumb" style="display:flex;align-items:center;justify-content:center;font-size:20px;">图</div>
+        <div><strong>图 ${j + 1}</strong><label>主体描述（图${j + 1} 对应哪个人物）</label>
+        <input type="text" data-ii="${j}" class="img-sub-inp" value="${escapeAttr(im.subject)}" placeholder="如：女主角林晓，短发黑衣" /></div>`;
+      li.appendChild(div);
+    });
+    li.querySelectorAll(".img-sub-inp").forEach((inp) => {
+      inp.oninput = () => { state.imageRefs[+inp.dataset.ii].subject = inp.value; };
+    });
+  }
+
+  function escapeAttr(s) {
+    return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  }
+
+  async function refreshTaskStatus() {
+    if (!state.taskId) return null;
+    const st = await api("/api/task/" + state.taskId);
+    renderProgress(st);
+    if (st.storyboard) {
+      const sig = JSON.stringify(st.storyboard);
+      if (state.storyboardSig !== sig) {
+        state.storyboard = st.storyboard;
+        state.storyboardSig = sig;
+        renderShots();
+      }
+      $("#shots-empty").classList.add("hidden");
+    }
+    if (st.output_url) {
+      $("#output-wrap").classList.remove("hidden");
+      if (state.lastOutputUrl !== st.output_url) {
+        state.lastOutputUrl = st.output_url;
+        $("#output-video").src = st.output_url;
+        $("#download-link").href = st.output_url;
+      }
+    }
+    return st;
+  }
+
+  function startPoll() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = setInterval(async () => {
+      if (!state.taskId) return;
+      try {
+        const st = await refreshTaskStatus();
+        if (st && (st.status === "done" || st.status === "failed")) {
+          clearInterval(state.pollTimer);
+          state.pollTimer = null;
+        }
+      } catch (e) {
+        const log = $("#progress-log");
+        const errLine = `<div style="color:var(--danger)">轮询失败：${escapeHtml(e.message || String(e))}</div>`;
+        log.innerHTML += errLine;
+        const th = $("#task-hint");
+        if (th) th.textContent = "无法拉取状态：" + (e.message || e);
+      }
+    }, 1500);
+  }
+
+  function renderProgress(st) {
+    const log = $("#progress-log");
+    log.innerHTML = (st.progress || []).map((p) => `<div>[${(p.t || "").slice(11, 19)}] ${escapeHtml(p.msg)}</div>`).join("");
+    log.scrollTop = log.scrollHeight;
+    if (st.error) log.innerHTML += `<div style="color:var(--danger)">${escapeHtml(st.error)}</div>`;
+    const hint = $("#task-hint");
+    if (hint && st.status) {
+      if (st.status === "theme_running") hint.textContent = "主题分镜生成中…（日志见下方第 4 步）";
+      else if (st.status === "analyze_running") hint.textContent = "视频分析中…";
+      else if (st.status === "generating" || st.status === "queued_generate") hint.textContent = "视频生成中…";
+      else if (st.status === "storyboard_ready") hint.textContent = "分镜已就绪，可编辑第 3 步";
+      else if (st.status === "failed") hint.textContent = (st.error || "失败").slice(0, 100);
+      else if (st.status === "done") hint.textContent = "已完成";
+      else hint.textContent = "";
+    }
+  }
+
+  function escapeHtml(s) {
+    const d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function renderShots() {
+    const sb = state.storyboard;
+    if (!sb || !sb.shots) return;
+    const c = $("#shots-container");
+    c.innerHTML = "";
+    sb.shots.forEach((shot, idx) => {
+      const card = document.createElement("div");
+      card.className = "shot-card";
+      card.innerHTML = `
+        <header>镜头 ${shot.shot_id} · ${shot.duration}s · ${escapeHtml(shot.shot_type || "")}</header>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px;">${escapeHtml(shot.scene_description || "").slice(0, 200)}</div>
+        <label>对白 dialogue</label>
+        <textarea data-field="dialogue" data-idx="${idx}">${escapeHtml(shot.dialogue || "")}</textarea>
+        <label>generation_prompt（英文）</label>
+        <textarea data-field="generation_prompt" data-idx="${idx}">${escapeHtml(shot.generation_prompt || "")}</textarea>`;
+      c.appendChild(card);
+    });
+    c.querySelectorAll("textarea").forEach((ta) => {
+      ta.onblur = scheduleSaveStoryboard;
+    });
+  }
+
+  function scheduleSaveStoryboard() {
+    clearTimeout(state.saveShotTimer);
+    state.saveShotTimer = setTimeout(saveStoryboardNow, 600);
+  }
+
+  async function saveStoryboardNow() {
+    if (!state.taskId || !state.storyboard) return;
+    const tas = $("#shots-container").querySelectorAll("textarea");
+    tas.forEach((ta) => {
+      const idx = +ta.dataset.idx;
+      const field = ta.dataset.field;
+      if (state.storyboard.shots[idx]) state.storyboard.shots[idx][field] = ta.value;
+    });
+    await api("/api/storyboard/" + state.taskId, {
+      method: "PUT",
+      json: true,
+      body: state.storyboard,
+    });
+    state.storyboardSig = JSON.stringify(state.storyboard);
+  }
+
+  function buildGeneratePayload() {
+    const textOnly = $("#text-only").checked;
+    const refVideos = state.videoRefs.map((v) => v.path);
+    const refVideoDescs = refVideos.length
+      ? state.videoRefs.map((v) => (v.desc && v.desc.trim()) || "参考视频中的人物与动作")
+      : [];
+    const subjectLines = [];
+    state.videoRefs.forEach((v, i) => {
+      subjectLines.push(`视频${i + 1}：${v.desc || "外观与动作见参考视频"}`);
+    });
+    state.imageRefs.forEach((im, j) => {
+      subjectLines.push(`图${j + 1}：${im.subject || "见参考图主体"}`);
+    });
+    if (textOnly) {
+      const lines = ($("#textonly-subjects").value || "").split("\n").map((s) => s.trim()).filter(Boolean);
+      return {
+        task_id: state.taskId,
+        text_only_video: true,
+        subject_lines: lines.length ? lines : ["（文生无参考，仅靠分镜与风格）"],
+        style: $("#gen-style").value.trim(),
+        resolution: $("#gen-resolution").value.trim() || null,
+        max_segment_seconds: parseFloat($("#max-seg").value) || 15,
+      };
+    }
+    return {
+      task_id: state.taskId,
+      text_only_video: false,
+      reference_images: state.imageRefs.map((x) => x.path),
+      reference_videos: refVideos,
+      reference_video_descriptions: refVideoDescs,
+      subject_lines: subjectLines,
+      style: $("#gen-style").value.trim(),
+      resolution: $("#gen-resolution").value.trim() || null,
+      max_segment_seconds: parseFloat($("#max-seg").value) || 15,
+    };
+  }
+
+  $("#btn-theme").onclick = async () => {
+    if (!state.taskId) { alert("请先新建任务"); return; }
+    const th = $("#task-hint");
+    if (th) th.textContent = "正在提交…";
+    try {
+      await api("/api/task/theme", {
+        method: "POST",
+        json: true,
+        body: {
+          task_id: state.taskId,
+          theme: $("#theme-text").value,
+          style: $("#theme-style").value,
+          min_shots: +$("#min-shots").value,
+          max_shots: +$("#max-shots").value,
+          model: $("#theme-model").value.trim() || null,
+        },
+      });
+      if (th) th.textContent = "已提交，正在拉取状态…";
+      $("#step4").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try {
+        await refreshTaskStatus();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+      startPoll();
+    } catch (e) {
+      alert(e.message || String(e));
+      if (th) th.textContent = "";
+    }
+  };
+
+  $("#btn-analyze").onclick = async () => {
+    if (!state.taskId) { alert("请先新建任务"); return; }
+    const th = $("#task-hint");
+    if (th) th.textContent = "正在提交…";
+    try {
+      const url = $("#video-url").value.trim();
+      const file = $("#video-file").files[0];
+      if (url) {
+        await api("/api/task/analyze", {
+          method: "POST",
+          json: true,
+          body: {
+            task_id: state.taskId,
+            video_url: url,
+            style: $("#analyze-style").value,
+            segment_scenes: $("#segment-scenes").checked,
+          },
+        });
+      } else if (file) {
+        const fd = new FormData();
+        fd.append("task_id", state.taskId);
+        fd.append("video", file);
+        fd.append("style", $("#analyze-style").value);
+        fd.append("segment_scenes", $("#segment-scenes").checked ? "true" : "false");
+        const r = await fetch("/api/task/analyze", { method: "POST", body: fd });
+        let j = {};
+        try { j = await r.json(); } catch (_) {}
+        if (!r.ok) { alert(j.error || r.statusText || "失败"); if (th) th.textContent = ""; return; }
+      } else {
+        alert("请上传视频或填写 URL");
+        if (th) th.textContent = "";
+        return;
+      }
+      if (th) th.textContent = "已提交，正在拉取状态…";
+      $("#step4").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try { await refreshTaskStatus(); } catch (e) { alert(e.message || String(e)); }
+      startPoll();
+    } catch (e) {
+      alert(e.message || String(e));
+      if (th) th.textContent = "";
+    }
+  };
+
+  $("#btn-generate").onclick = async () => {
+    if (!state.taskId) { alert("请先新建任务并完成分镜"); return; }
+    if (!$("#text-only").checked) {
+      if (!state.imageRefs.length && !state.videoRefs.length) {
+        const ok = confirm("未上传参考图/视频。若配置 require_reference=true 将失败。是否改用纯文生？");
+        if (ok) $("#text-only").checked = true;
+        else return;
+      }
+    }
+    const th = $("#task-hint");
+    if (th) th.textContent = "正在提交生成…";
+    try {
+      await saveStoryboardNow();
+      await api("/api/task/generate", {
+        method: "POST",
+        json: true,
+        body: buildGeneratePayload(),
+      });
+      $("#step4").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try { await refreshTaskStatus(); } catch (e) { alert(e.message || String(e)); }
+      startPoll();
+    } catch (e) {
+      alert(e.message || String(e));
+      if (th) th.textContent = "";
+    }
+  };
+
+  $("#btn-clear-seg").onclick = async () => {
+    if (!state.taskId) return;
+    if (!confirm("确定删除已缓存片段？")) return;
+    await api("/api/workspace/clear-segments/" + state.taskId, {
+      method: "POST",
+      json: true,
+      body: {},
+    });
+    alert("已清除");
+  };
+
+  $("#btn-run-theme").onclick = async () => {
+    if (!state.taskId) { alert("请先新建任务"); return; }
+    const th = $("#task-hint");
+    if (th) th.textContent = "正在提交流水线…";
+    try {
+      const gen = buildGeneratePayload();
+      await api("/api/task/run", {
+        method: "POST",
+        json: true,
+        body: {
+          ...gen,
+          theme: $("#theme-text").value,
+          style: $("#theme-style").value.trim() || gen.style || "",
+          min_shots: +$("#min-shots").value,
+          max_shots: +$("#max-shots").value,
+          model: $("#theme-model").value.trim() || null,
+        },
+      });
+      $("#step4").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try { await refreshTaskStatus(); } catch (e) { alert(e.message || String(e)); }
+      startPoll();
+    } catch (e) {
+      alert(e.message || String(e));
+      if (th) th.textContent = "";
+    }
+  };
+
+  $("#btn-run-analyze").onclick = async () => {
+    if (!state.taskId) { alert("请先新建任务"); return; }
+    const th = $("#task-hint");
+    if (th) th.textContent = "正在提交…";
+    try {
+      const url = $("#video-url").value.trim();
+      const file = $("#video-file").files[0];
+      if (!url && !file) { alert("请上传视频或填 URL"); if (th) th.textContent = ""; return; }
+      if (file && !url) {
+        const fd = new FormData();
+        fd.append("task_id", state.taskId);
+        fd.append("video", file);
+        fd.append("style", $("#analyze-style").value);
+        fd.append("segment_scenes", $("#segment-scenes").checked ? "true" : "false");
+        const r = await fetch("/api/task/analyze", { method: "POST", body: fd });
+        let j = {};
+        try { j = await r.json(); } catch (_) {}
+        if (!r.ok) { alert(j.error || "失败"); if (th) th.textContent = ""; return; }
+        await new Promise((r2) => setTimeout(r2, 500));
+        await waitStoryboardReady();
+        await api("/api/task/generate", { method: "POST", json: true, body: buildGeneratePayload() });
+        $("#step4").scrollIntoView({ behavior: "smooth", block: "nearest" });
+        try { await refreshTaskStatus(); } catch (e) { alert(e.message || String(e)); }
+        startPoll();
+        return;
+      }
+      await api("/api/task/run", {
+        method: "POST",
+        json: true,
+        body: {
+          task_id: state.taskId,
+          video_url: url,
+          style: $("#analyze-style").value,
+          segment_scenes: $("#segment-scenes").checked,
+          ...buildGeneratePayload(),
+        },
+      });
+      $("#step4").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try { await refreshTaskStatus(); } catch (e) { alert(e.message || String(e)); }
+      startPoll();
+    } catch (e) {
+      alert(e.message || String(e));
+      if (th) th.textContent = "";
+    }
+  };
+
+  async function waitStoryboardReady() {
+    for (let i = 0; i < 600; i++) {
+      const st = await api("/api/task/" + state.taskId);
+      if (st.status === "storyboard_ready") return;
+      if (st.status === "failed") throw new Error(st.error || "分析失败");
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    throw new Error("分析超时");
+  }
+
+  async function refreshHistory() {
+    const { tasks } = await api("/api/workspace/list");
+    const el = $("#history-list");
+    el.innerHTML = tasks.length ? "" : "<p class='hint'>暂无记录</p>";
+    tasks.forEach((t) => {
+      const div = document.createElement("div");
+      div.className = "history-item";
+      div.innerHTML = `<strong>${t.task_id}</strong><br/><span class="hint">${t.status} · ${(t.updated || "").slice(0, 19)}</span>`;
+      div.onclick = () => {
+        setTaskId(t.task_id);
+        closeDrawer("history");
+        api("/api/task/" + t.task_id).then((st) => {
+          if (st.storyboard) {
+            state.storyboard = st.storyboard;
+            state.storyboardSig = JSON.stringify(st.storyboard);
+            renderShots();
+            $("#shots-empty").classList.add("hidden");
+          } else {
+            state.storyboard = null;
+            state.storyboardSig = null;
+          }
+          renderProgress(st);
+          if (st.output_url) {
+            $("#output-wrap").classList.remove("hidden");
+            state.lastOutputUrl = st.output_url;
+            $("#output-video").src = st.output_url;
+            $("#download-link").href = st.output_url;
+          } else {
+            state.lastOutputUrl = null;
+          }
+        });
+        startPoll();
+      };
+      el.appendChild(div);
+    });
+  }
+
+  $("#btn-resume-ws").onclick = () => $("#btn-history").click();
+
+  loadConfigForm();
+})();
+  </script>
+</body>
+</html>

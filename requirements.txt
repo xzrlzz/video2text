@@ -1,0 +1,6 @@
+openai>=1.30.0
+dashscope>=1.25.8
+scenedetect[opencv]>=0.6
+opencv-python>=4.8.0
+click>=8.0
+flask>=3.0.0

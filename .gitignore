@@ -1,0 +1,11 @@
+# 本地密钥（请用 config.example.json 复制为 config.json）
+config.json
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.mp4
+*.storyboard.json
+.DS_Store
+workspace/
