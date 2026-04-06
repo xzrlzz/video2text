@@ -95,15 +95,24 @@
 
     <!-- Step 2：参考主体 -->
     <div class="card" id="step2">
-      <h2>2 · 参考主体（参考生 r2v）</h2>
+      <h2>2 · 参考主体</h2>
       <p class="hint">
-        上传参考视频/图片，并填写每个主体对应的人物描述（<strong>请用英文</strong>，如 "female lead, short black hair, dark jacket"）。<br/>
-        这些描述会作为 <code>video1: xxx</code> / <code>image1: xxx</code> 注入到视频生成 prompt 中。纯文生请打开下方开关。
+        分镜生成后会自动识别角色并创建主体卡片。每张卡片支持中英文描述互译（失焦自动翻译）。<br/>
+        英文描述将注入每段视频生成 prompt，是维持跨镜主体一致性的关键。
       </p>
+
+      <!-- 主体卡片列表（中英双语，自动生成 + 手动编辑） -->
+      <div id="subjects-section">
+        <div id="subjects-list"></div>
+        <button type="button" class="ghost sm" id="btn-add-subject" style="margin-top:10px;">+ 手动添加主体</button>
+      </div>
+
+      <hr style="border-color:var(--border);margin:20px 0;" />
+
       <div class="toggle-row">
         <label class="switch">
           <input type="checkbox" id="text-only" />
-          <span>纯文生视频（无参考，t2v）</span>
+          <span>纯文生视频（无参考，t2v）— 将使用上方主体英文描述</span>
         </label>
       </div>
       <div id="ref-section">
@@ -116,17 +125,13 @@
         <input type="file" id="input-images" class="hidden" accept="image/*" multiple />
         <div class="ref-list" id="list-images"></div>
       </div>
-      <div id="textonly-subject-wrap" class="hidden">
-        <label>主体文字（写入每段 prompt 的主体声明，一行一条，<strong>请用英文</strong>）</label>
-        <textarea id="textonly-subjects" placeholder="e.g.: Lin Xiao, female, 28, short black hair, determined gaze"></textarea>
-      </div>
     </div>
 
     <!-- Step 3：分镜预览与编辑 -->
     <div class="card" id="step3">
       <h2>3 · 分镜预览</h2>
       <p class="hint">
-        可编辑<strong>对白</strong>（中文，标明说话人）和 <strong>generation_prompt</strong>（英文，视频画面指令）。
+        可编辑<strong>对白 dialogue</strong>（英文，标明说话人，如 Alex: "Are you okay?"）和 <strong>generation_prompt</strong>（英文，视频画面指令）。
         失焦自动保存。<code>generation_prompt</code> 留空时将使用场景描述自动填充。
       </p>
       <div id="shots-container" class="shots"></div>

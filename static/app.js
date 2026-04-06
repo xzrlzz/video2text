@@ -17,6 +17,7 @@
         meta: {},
         videoRefs: [],
         imageRefs: [],
+        subjects: [],          // [{name, name_zh, description_en, description_zh}]
         storyboard: null,
         storyboardSig: null,
         lastOutputUrl: null,
@@ -158,6 +159,10 @@
     $('#task-id-display').textContent = id;
     renderHint(t.meta);
 
+    // 主体卡片：先用缓存立即渲染，再后台拉新数据（避免空白等待）
+    renderSubjects();
+    loadSubjects(id);
+
     // 渲染参考列表
     renderRefLists();
 
@@ -261,6 +266,8 @@
             showToast(`分镜已生成（${data.shot_count || '?'} 镜），请查看步骤 3 预览`, 'success', 4000);
             $('#step3').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
           }
+          // 主体也可能很快就绪，延迟轮询兜底（防止 SSE subjects_ready 丢失）
+          _pollSubjectsUntilReady(task_id);
         }
 
         const terminal = ['done', 'failed', 'cancelled'];
@@ -273,13 +280,31 @@
           // 拉一次最终状态补全 segments / output_url
           refreshTaskOnce(task_id);
         }
+      } else if (data.type === 'subjects_ready') {
+        // 主体描述生成完成，直接用 SSE 携带的数据填充，省去额外 HTTP 请求
+        if (data.subjects && data.subjects.length) {
+          const t = getTask(task_id);
+          t.subjects = data.subjects;
+          if (task_id === currentTaskId) renderSubjects();
+        } else {
+          loadSubjects(task_id);
+        }
       }
     };
 
+    let _reconnectTimer = null;
     es.onerror = () => {
-      // SSE 断开时降级：不再重连，依赖用户手动刷新或切换任务
       es.close();
       t.sseSource = null;
+      // 若任务仍在运行，3s 后自动重连，并拉一次最新进度补全日志
+      const cur = getTask(task_id);
+      if (isRunning(cur.meta.status) || !cur.meta.status) {
+        clearTimeout(_reconnectTimer);
+        _reconnectTimer = setTimeout(() => {
+          refreshTaskOnce(task_id);   // 补全日志
+          connectSSE(task_id);        // 重新订阅
+        }, 3000);
+      }
     };
   }
 
@@ -328,12 +353,18 @@
   // ── 进度渲染 ────────────────────────────────────────────────────────────────
   function renderProgress(meta) {
     const log = $('#progress-log');
-    log.innerHTML = (meta.progress || []).map(p =>
+    const lines = (meta.progress || []).map(p =>
       `<div>[${(p.t || '').slice(11, 19)}] ${escapeHtml(p.msg)}</div>`
-    ).join('');
+    );
+    // 错误信息当作最后一条普通日志行插入，不单独钉底
     if (meta.error && meta.status === 'failed') {
-      log.innerHTML += `<div class="log-error">✗ ${escapeHtml(meta.error)}</div>`;
+      lines.push(`<div class="log-error">✗ ${escapeHtml(meta.error)}</div>`);
     }
+    // 运行中显示等待指示（追在所有日志后，但不重复叠加）
+    if (['theme_running', 'analyze_running'].includes(meta.status)) {
+      lines.push(`<div class="log-waiting" id="log-waiting-dot">⏳ Waiting for LLM response<span class="dot-anim">…</span></div>`);
+    }
+    log.innerHTML = lines.join('');
     log.scrollTop = log.scrollHeight;
 
     // 进度条
@@ -401,23 +432,249 @@
     });
   }
 
+  // ── 主体描述（subjects）────────────────────────────────────────────────────
+
+  // 分镜就绪后轮询，直到主体卡片数据出现（最多等 3 分钟，每 8s 一次）
+  // 主要用于兜底：防止 SSE subjects_ready 因断线等原因丢失
+  let _pollSubjectsTimer = null;
+  function _pollSubjectsUntilReady(task_id) {
+    clearTimeout(_pollSubjectsTimer);
+    let attempts = 0;
+    async function poll() {
+      const t = getTask(task_id);
+      // 已经有数据或任务已终止就停
+      if ((t.subjects && t.subjects.length > 0) || isRunning(t.meta.status) === false && t.meta.status !== 'storyboard_ready') return;
+      try {
+        const r = await api('/api/task/subjects/' + task_id);
+        const fetched = r.subjects || [];
+        if (fetched.length > 0) {
+          t.subjects = fetched;
+          if (task_id === currentTaskId) renderSubjects();
+          return; // 已拿到，停止轮询
+        }
+      } catch (_) {}
+      attempts++;
+      if (attempts < 22) { // 最多轮询约 3 分钟
+        _pollSubjectsTimer = setTimeout(poll, 8000);
+      }
+    }
+    // 稍等一下再开始，给 LLM 一点启动时间
+    _pollSubjectsTimer = setTimeout(poll, 5000);
+  }
+
+  async function loadSubjects(task_id) {
+    const t = getTask(task_id);
+    const alreadyHas = t.subjects && t.subjects.length > 0;
+    // 已有缓存数据时直接渲染，不显示骨架（避免闪烁）
+    if (!alreadyHas && task_id === currentTaskId) {
+      const list = $('#subjects-list');
+      if (list) list.innerHTML = '<div class="subjects-loading"><span class="loading-spinner"></span> 加载主体描述中…</div>';
+    }
+    try {
+      const r = await api('/api/task/subjects/' + task_id);
+      const fetched = r.subjects || [];
+      // 仅当服务端有数据，或内存中本来就没有时才更新（防止覆盖 SSE 已推来的最新数据）
+      if (fetched.length > 0 || !alreadyHas) {
+        t.subjects = fetched;
+      }
+      if (task_id === currentTaskId) renderSubjects();
+    } catch (_) {
+      if (task_id === currentTaskId) renderSubjects();
+    }
+  }
+
+  async function saveSubjects() {
+    if (!currentTaskId) return;
+    const t = getTask(currentTaskId);
+    try {
+      await api('/api/task/subjects/' + currentTaskId, {
+        method: 'PUT', json: true, body: { subjects: t.subjects }
+      });
+    } catch (e) {
+      showToast('保存主体失败：' + e.message, 'error', 3000);
+    }
+  }
+
+  // 将主体名字列表提取出来（用于 @chip 匹配）
+  function getSubjectNames(task_id) {
+    const t = allTasks[task_id];
+    if (!t) return [];
+    return (t.subjects || []).map(s => s.name).filter(Boolean);
+  }
+
+  // 将文本中的 @Name 替换为 chip span
+  function renderMentionChips(text, names) {
+    if (!text || !names.length) return escapeHtml(text);
+    // 按名字长度从长到短排序，避免短名截断长名
+    const sorted = [...names].sort((a, b) => b.length - a.length);
+    const escaped = escapeHtml(text);
+    // 对每个名字做替换（在 HTML 转义后的文本里匹配）
+    let result = escaped;
+    sorted.forEach(name => {
+      const eName = escapeHtml(name);
+      const re = new RegExp('@' + eName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+      result = result.replace(re, `<span class="mention-chip">@${eName}</span>`);
+    });
+    return result;
+  }
+
+  let _translateTimers = {};
+
+  async function translateField(task_id, idx, fromField, toField) {
+    const t = getTask(task_id);
+    const text = (t.subjects[idx] || {})[fromField] || '';
+    if (!text.trim()) return;
+    const target = toField === 'description_en' ? 'en' : 'zh';
+    try {
+      const r = await api('/api/translate', {
+        method: 'POST', json: true,
+        body: { text, target }
+      });
+      if (r.result && t.subjects[idx]) {
+        t.subjects[idx][toField] = r.result;
+        // 更新对应的 textarea（不触发再次翻译）
+        const card = $('#subjects-list').querySelector(`[data-sidx="${idx}"]`);
+        if (card) {
+          const ta = card.querySelector(`[data-sfield="${toField}"]`);
+          if (ta && document.activeElement !== ta) ta.value = r.result;
+        }
+        saveSubjects();
+      }
+    } catch (_) {}
+  }
+
+  function renderSubjects() {
+    const t = getTask(currentTaskId);
+    const list = $('#subjects-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (!t.subjects || t.subjects.length === 0) {
+      // 任务还在运行（分镜生成中）或刚完成分镜还没写完主体 → 显示生成中
+      const generatingSubjects = isRunning(t.meta.status) || t.meta.status === 'storyboard_ready';
+      if (generatingSubjects) {
+        list.innerHTML = '<div class="subjects-loading"><span class="loading-spinner"></span> 主体描述生成中，请稍候…</div>';
+      } else if (t.meta.status && t.meta.status !== 'created') {
+        list.innerHTML = '<div class="subjects-empty">暂无主体，点击「+ 手动添加主体」创建</div>';
+      }
+      return;
+    }
+
+    (t.subjects || []).forEach((subj, idx) => {
+      const card = document.createElement('div');
+      card.className = 'subject-card';
+      card.dataset.sidx = idx;
+      card.innerHTML = `
+        <div class="subject-card-header">
+          <div class="subject-names">
+            <input class="subject-name-en" data-sidx="${idx}" data-sfield="name"
+              value="${escapeAttr(subj.name || '')}" placeholder="Name (EN)" />
+            <span class="subject-name-sep">/</span>
+            <input class="subject-name-zh" data-sidx="${idx}" data-sfield="name_zh"
+              value="${escapeAttr(subj.name_zh || '')}" placeholder="中文名" />
+          </div>
+          <button class="ghost sm subject-del" data-sidx="${idx}" title="删除">✕</button>
+        </div>
+        <div class="subject-fields">
+          <div class="subject-field">
+            <label class="subject-field-label">EN Description <span class="field-tag">→ prompt</span></label>
+            <textarea data-sidx="${idx}" data-sfield="description_en" rows="3"
+              placeholder="Detailed English description for video prompt injection…">${escapeHtml(subj.description_en || '')}</textarea>
+          </div>
+          <div class="subject-field">
+            <label class="subject-field-label">中文描述 <span class="field-tag">↔ 自动互译</span></label>
+            <textarea data-sidx="${idx}" data-sfield="description_zh" rows="3"
+              placeholder="中文描述，失焦后自动翻译为英文…">${escapeHtml(subj.description_zh || '')}</textarea>
+          </div>
+        </div>`;
+      list.appendChild(card);
+    });
+
+    // 绑定事件
+    list.querySelectorAll('input[data-sfield], textarea[data-sfield]').forEach(el => {
+      const idx = +el.dataset.sidx;
+      const field = el.dataset.sfield;
+      el.oninput = () => {
+        const t = getTask(currentTaskId);
+        if (t.subjects[idx]) t.subjects[idx][field] = el.value;
+      };
+      el.onblur = () => {
+        const t = getTask(currentTaskId);
+        if (t.subjects[idx]) t.subjects[idx][field] = el.value;
+        saveSubjects();
+        // 自动互译
+        if (field === 'description_zh' && el.value.trim()) {
+          clearTimeout(_translateTimers[`${idx}_zh`]);
+          _translateTimers[`${idx}_zh`] = setTimeout(
+            () => translateField(currentTaskId, idx, 'description_zh', 'description_en'), 200
+          );
+        } else if (field === 'description_en' && el.value.trim()) {
+          clearTimeout(_translateTimers[`${idx}_en`]);
+          _translateTimers[`${idx}_en`] = setTimeout(
+            () => translateField(currentTaskId, idx, 'description_en', 'description_zh'), 200
+          );
+        }
+      };
+    });
+
+    list.querySelectorAll('.subject-del').forEach(btn => {
+      btn.onclick = () => {
+        const t = getTask(currentTaskId);
+        t.subjects.splice(+btn.dataset.sidx, 1);
+        saveSubjects();
+        renderSubjects();
+        renderShots(); // 刷新 chip 高亮
+      };
+    });
+  }
+
+  // 新增一个空主体
+  if ($('#btn-add-subject')) {
+    $('#btn-add-subject').onclick = () => {
+      if (!currentTaskId) { showToast('请先新建任务'); return; }
+      const t = getTask(currentTaskId);
+      t.subjects.push({ name: '', name_zh: '', description_en: '', description_zh: '' });
+      renderSubjects();
+      // 聚焦到最新 name 输入
+      const cards = $('#subjects-list').querySelectorAll('.subject-card');
+      if (cards.length) {
+        const last = cards[cards.length - 1];
+        const inp = last.querySelector('.subject-name-en');
+        if (inp) inp.focus();
+      }
+    };
+  }
+
   // ── 分镜编辑 ────────────────────────────────────────────────────────────────
   function renderShots() {
     const t = getTask(currentTaskId);
     const sb = t.storyboard;
     if (!sb || !sb.shots) return;
+    const names = getSubjectNames(currentTaskId);
     const c = $('#shots-container');
     c.innerHTML = '';
     sb.shots.forEach((shot, idx) => {
       const card = document.createElement('div');
       card.className = 'shot-card';
       const hasPrompt = (shot.generation_prompt || '').trim().length > 0;
+
+      // 检测本镜中出现的角色
+      const shotText = [shot.dialogue, shot.character_action, shot.scene_description].join(' ');
+      const mentioned = names.filter(n => shotText.includes(n) || shotText.includes('@' + n));
+      const chipsHtml = mentioned.map(n => `<span class="mention-chip">@${escapeHtml(n)}</span>`).join('');
+
+      // scene_description 里的 @Name 高亮
+      const sceneHtml = renderMentionChips((shot.scene_description || '').slice(0, 200), names);
+      // dialogue 里的 @Name 高亮（只读展示，编辑区为普通 textarea）
+      const dialogueDisplay = renderMentionChips(shot.dialogue || '', names);
+
       card.innerHTML = `
         <header>
-          <span>镜头 ${shot.shot_id} · ${shot.duration}s · ${escapeHtml(shot.shot_type || '')}</span>
+          <span>Shot ${shot.shot_id} · ${shot.duration}s · ${escapeHtml(shot.shot_type || '')}</span>
+          <div class="shot-mentions">${chipsHtml}</div>
         </header>
-        <div class="scene-desc">${escapeHtml((shot.scene_description || '').slice(0, 200))}</div>
-        <label>对白 dialogue（中文台词，标明说话人）</label>
+        <div class="scene-desc">${sceneHtml}</div>
+        <label>对白 dialogue（英文，标明说话人，如 Alex: "Are you okay?"）</label>
         <textarea data-field="dialogue" data-idx="${idx}">${escapeHtml(shot.dialogue || '')}</textarea>
         <label>generation_prompt（英文，视频画面指令）</label>
         <textarea data-field="generation_prompt" data-idx="${idx}">${escapeHtml(shot.generation_prompt || '')}</textarea>
@@ -582,11 +839,14 @@
     });
 
     if (textOnly) {
-      const lines = ($('#textonly-subjects').value || '').split('\n').map(s => s.trim()).filter(Boolean);
+      // 纯文生：从主体卡片的 description_en 自动构建 subject_lines
+      const subjectLines = (t.subjects || [])
+        .filter(s => s.name && s.description_en)
+        .map(s => `${s.name}: ${s.description_en.trim()}`);
       return {
         task_id: currentTaskId,
         text_only_video: true,
-        subject_lines: lines,
+        subject_lines: subjectLines,
         style: $('#gen-style').value.trim(),
         resolution: $('#gen-resolution').value.trim() || null,
         max_segment_seconds: parseFloat($('#max-seg').value) || 15,
@@ -981,7 +1241,10 @@
   async function loadHistoryTask(task_id) {
     const t = getTask(task_id);
     try {
-      const st = await api('/api/task/' + task_id);
+      const [st] = await Promise.all([
+        api('/api/task/' + task_id),
+        loadSubjects(task_id),
+      ]);
       t.meta = { ...st };
       delete t.meta.storyboard;
       if (st.storyboard) {
@@ -992,7 +1255,6 @@
       connectSSE(task_id);
       switchTask(task_id);
       renderStatusBar();
-      // 若仍在运行则 SSE 会自动接管
     } catch (e) {
       showToast('加载任务失败：' + e.message);
     }

@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from openai import OpenAI
+
 from video2text.config.settings import load_generation_extras, load_settings
 from video2text.utils.paths import (
     get_config_example_path,
@@ -291,20 +293,21 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
     try:
         _write_task_meta(task_id, {"status": "theme_running", "type": "theme"})
         _sse_push(task_id, {"type": "status", "status": "theme_running"})
-        log("主题分镜任务已启动，正在加载配置…")
+        log("Storyboard generation started, loading config…")
         settings = load_settings(str(CONFIG_PATH))
         theme = (params.get("theme") or "").strip()
         if not theme:
             raise ValueError("主题为空")
-        log(
-            f"主题创作中（模型 {params.get('model') or settings.theme_story_model or settings.vision_model}）…"
-        )
+        use_model = params.get("model") or settings.theme_story_model or settings.vision_model
+        min_shots = int(params.get("min_shots") or 8)
+        max_shots = int(params.get("max_shots") or 24)
+        log(f"Calling LLM ({use_model}) to generate {min_shots}–{max_shots} shots… (this may take 15–60s)")
         doc = generate_storyboard_from_theme(
             theme,
             settings,
             style_hint=str(params.get("style") or ""),
-            min_shots=int(params.get("min_shots") or 8),
-            max_shots=int(params.get("max_shots") or 24),
+            min_shots=min_shots,
+            max_shots=max_shots,
             model=params.get("model") or None,
         )
         td = _task_dir(task_id)
@@ -319,6 +322,16 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
         )
         _sse_push(task_id, {"type": "status", "status": "storyboard_ready", "shot_count": len(doc.shots)})
         log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
+        # 自动生成主体描述
+        log("Generating character subject descriptions…")
+        try:
+            subjects = _generate_subjects_from_storyboard(doc, settings)
+            if subjects:
+                _write_subjects(task_id, subjects)
+                _sse_push(task_id, {"type": "subjects_ready", "count": len(subjects), "subjects": subjects})
+                log(f"Subject descriptions generated: {len(subjects)} characters.")
+        except Exception as se:
+            log(f"Subject generation skipped: {se}")
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
@@ -332,7 +345,7 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
     try:
         _write_task_meta(task_id, {"status": "analyze_running", "type": "analyze"})
         _sse_push(task_id, {"type": "status", "status": "analyze_running"})
-        log("视频分析任务已启动，正在加载配置…")
+        log("Video analysis started, loading config…")
         settings = load_settings(str(CONFIG_PATH))
         td = _task_dir(task_id)
         consolidate_flag = not params.get("skip_consolidate")
@@ -342,7 +355,7 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
         video_url = params.get("video_url")
 
         if video_url:
-            log("整片分析（URL）…")
+            log(f"Analyzing full video via URL (this may take 30–120s)… {video_url[:80]}")
             doc = analyze_full_video_url(
                 video_url,
                 settings,
@@ -353,7 +366,7 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
         elif video_path and Path(video_path).is_file():
             vp = Path(video_path)
             if params.get("segment_scenes"):
-                log("场景切片分析…")
+                log(f"Scene detection on: {vp.name}")
                 wd = td / "analyze_work"
                 wd.mkdir(parents=True, exist_ok=True)
                 thr = params.get("threshold")
@@ -364,15 +377,16 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
                     threshold=float(thr),
                     extract_clips=True,
                     extract_frames=True,
-                    work_dir=str(wd),
+                    work_dir=wd,
                 )
+                log(f"Detected {len(result.segments)} scenes, calling vision LLM for each… (may take 1–3 min)")
                 doc, _ = analyze_scene_segments(result.segments, settings, style_hint=style)
                 doc.source_video = str(vp.resolve())
                 if consolidate_flag:
-                    log("叙事整合…")
+                    log("Consolidating narrative across scenes…")
                     doc = consolidate_storyboard(doc, settings)
             else:
-                log("整片分析（本地）…")
+                log(f"Analyzing full video (local): {vp.name} — calling vision LLM (may take 30–120s)…")
                 doc = analyze_full_video_local(
                     str(vp),
                     settings,
@@ -394,6 +408,16 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
         )
         _sse_push(task_id, {"type": "status", "status": "storyboard_ready", "shot_count": len(doc.shots)})
         log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
+        # 自动生成主体描述
+        log("Generating character subject descriptions…")
+        try:
+            subjects = _generate_subjects_from_storyboard(doc, settings)
+            if subjects:
+                _write_subjects(task_id, subjects)
+                _sse_push(task_id, {"type": "subjects_ready", "count": len(subjects), "subjects": subjects})
+                log(f"Subject descriptions generated: {len(subjects)} characters.")
+        except Exception as se:
+            log(f"Subject generation skipped: {se}")
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
@@ -824,6 +848,146 @@ def api_storyboard_put(task_id: str):
     doc.save_json(p)
     doc.save_markdown(td / "storyboard.md")
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# 路由：主体描述 (subjects.json)
+# ---------------------------------------------------------------------------
+
+def _read_subjects(task_id: str) -> list[dict[str, Any]]:
+    p = _task_dir(task_id) / "subjects.json"
+    if not p.is_file():
+        return []
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _write_subjects(task_id: str, subjects: list[dict[str, Any]]) -> None:
+    p = _task_dir(task_id) / "subjects.json"
+    p.write_text(json.dumps(subjects, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.route("/api/task/subjects/<task_id>", methods=["GET"])
+def api_subjects_get(task_id: str):
+    if not _task_dir(task_id).is_dir():
+        return jsonify({"error": "unknown task"}), 404
+    return jsonify({"subjects": _read_subjects(task_id)})
+
+
+@app.route("/api/task/subjects/<task_id>", methods=["PUT"])
+def api_subjects_put(task_id: str):
+    if not _task_dir(task_id).is_dir():
+        return jsonify({"error": "unknown task"}), 404
+    body = request.get_json(force=True, silent=True) or {}
+    subjects = body.get("subjects", [])
+    _write_subjects(task_id, subjects)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# 路由：LLM 翻译
+# ---------------------------------------------------------------------------
+
+@app.route("/api/translate", methods=["POST"])
+def api_translate():
+    """单字段翻译：给定文本和目标语言，返回翻译结果。"""
+    body = request.get_json(force=True, silent=True) or {}
+    text = (body.get("text") or "").strip()
+    target = (body.get("target") or "en").strip()  # "en" or "zh"
+    if not text:
+        return jsonify({"result": ""})
+    try:
+        settings = load_settings(str(CONFIG_PATH))
+        client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
+        use_model = (settings.theme_story_model or settings.vision_model or "").strip()
+        if target == "zh":
+            sys_prompt = "You are a professional translator. Translate the given English text to natural Simplified Chinese. Output the translation only, no explanation."
+            user_prompt = f"Translate to Chinese:\n{text}"
+        else:
+            sys_prompt = "You are a professional translator. Translate the given Chinese text to natural English. Output the translation only, no explanation."
+            user_prompt = f"Translate to English:\n{text}"
+        completion = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        result = (completion.choices[0].message.content or "").strip()
+        return jsonify({"result": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# 主体自动生成（分镜完成后调用）
+# ---------------------------------------------------------------------------
+
+_SUBJECT_GEN_SYSTEM = """You are a character description expert for AI video generation.
+Given a storyboard's character list and shot list, extract each named character and write a detailed visual description for each.
+
+Output strict JSON array only (no Markdown):
+[
+  {
+    "name": "Character name as used in dialogue/shots",
+    "name_zh": "Character name in Chinese (transliterate or translate)",
+    "description_en": "Detailed English visual description for video generation prompt injection. Include: gender, approximate age, distinctive physical traits (hair color/length/style, eye color, skin tone), typical outfit/wardrobe in this story, personality/expression tendency. Be specific and consistent. 2-4 sentences.",
+    "description_zh": "同上，中文版本。2-4句。"
+  }
+]
+
+Rules:
+- Only include named characters that appear in dialogue or character_action fields.
+- description_en must be detailed enough to maintain visual consistency across video segments.
+- Output JSON array only."""
+
+
+def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -> list[dict[str, Any]]:
+    """从分镜文档中提取角色列表，调用 LLM 生成详细主体描述。"""
+    client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
+    use_model = (settings.theme_story_model or settings.vision_model or "").strip()
+
+    # 构建角色上下文
+    dialogue_samples = []
+    action_samples = []
+    for s in doc.shots[:12]:
+        if s.dialogue and s.dialogue.strip():
+            dialogue_samples.append(s.dialogue.strip())
+        if s.character_action and s.character_action.strip():
+            action_samples.append(s.character_action.strip()[:120])
+
+    user_msg = (
+        f"Story title: {doc.title}\n"
+        f"Characters info: {doc.characters}\n"
+        f"Synopsis: {doc.synopsis[:300]}\n\n"
+        f"Sample dialogues:\n" + "\n".join(dialogue_samples[:8]) + "\n\n"
+        f"Sample actions:\n" + "\n".join(action_samples[:6]) + "\n\n"
+        "Extract all named characters and write detailed descriptions. Output JSON array only."
+    )
+
+    try:
+        completion = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": _SUBJECT_GEN_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        raw = (completion.choices[0].message.content or "").strip()
+        # 提取 JSON 数组
+        import re as _re
+        m = _re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+        if m:
+            raw = m.group(1).strip()
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start >= 0 and end > start:
+            return json.loads(raw[start:end + 1])
+    except Exception:
+        pass
+    return []
 
 
 # ---------------------------------------------------------------------------

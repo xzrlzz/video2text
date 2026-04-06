@@ -141,7 +141,7 @@ def build_scene_segments(
     if not ranges:
         ranges = [(0.0, duration)] if duration > 0 else [(0.0, 1.0)]
 
-    tmp_root = work_dir or Path(tempfile.mkdtemp(prefix="v2t_scenes_"))
+    tmp_root = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="v2t_scenes_"))
     tmp_root.mkdir(parents=True, exist_ok=True)
 
     segments: list[SceneSegment] = []
