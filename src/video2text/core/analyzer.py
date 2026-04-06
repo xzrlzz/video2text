@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -104,11 +106,23 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return json.loads(text[start : end + 1])
 
 
+# API hard limit for base64-encoded data-uri payload (DashScope/OpenAI compatible APIs)
+_API_BASE64_HARD_LIMIT = 10 * 1024 * 1024  # 10 MB encoded
+# Target raw size for compression attempts — gives ~8.5 MB encoded, safely under limit
+_COMPRESS_TARGET_BYTES = 6 * 1024 * 1024   # 6 MB raw
+
+
 def _video_to_data_url(path: Path, max_bytes: int) -> str:
     data = path.read_bytes()
-    if len(data) > max_bytes:
-        raise FileTooLargeForBase64(len(data), max_bytes)
+    # Apply both the user-configured limit and the API hard limit.
+    # base64 encoding inflates size by ~4/3, so pre-check raw bytes against both limits.
+    raw_limit = min(max_bytes, int(_API_BASE64_HARD_LIMIT * 3 / 4))  # ≈7.5 MB raw
+    if len(data) > raw_limit:
+        raise FileTooLargeForBase64(len(data), raw_limit)
     b64 = base64.standard_b64encode(data).decode("ascii")
+    # Double-check encoded size against the hard limit
+    if len(b64) > _API_BASE64_HARD_LIMIT:
+        raise FileTooLargeForBase64(len(data), raw_limit)
     return f"data:video/mp4;base64,{b64}"
 
 
@@ -117,6 +131,84 @@ class FileTooLargeForBase64(Exception):
         self.size = size
         self.limit = limit
         super().__init__(f"Clip {size} bytes exceeds base64 limit {limit}")
+
+
+def _compress_video_for_api(src: Path, target_bytes: int = _COMPRESS_TARGET_BYTES) -> Path | None:
+    """
+    Use ffmpeg to shrink a video clip so its raw size fits within target_bytes.
+    Strategy: scale down to ≤720p, then estimate bitrate from target size and duration.
+    Returns a Path to a temp file on success, or None if ffmpeg is unavailable / compression failed.
+    The caller is responsible for deleting the temp file when done.
+    """
+    try:
+        # Probe duration
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(src),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        duration = float(probe.stdout.strip() or "0")
+        if duration <= 0:
+            return None
+
+        # Calculate target video bitrate (kbps): leave ~64kbps for audio
+        audio_kbps = 64
+        target_kbps = max(100, int(target_bytes * 8 / duration / 1000) - audio_kbps)
+
+        tmp = tempfile.NamedTemporaryFile(suffix="_compressed.mp4", delete=False)
+        tmp.close()
+        out_path = Path(tmp.name)
+
+        cmd = [
+            "ffmpeg", "-y", "-i", str(src),
+            # Scale to max 720p, keep aspect ratio
+            "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+            "-b:v", f"{target_kbps}k", "-maxrate", f"{target_kbps * 2}k",
+            "-bufsize", f"{target_kbps * 4}k",
+            "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0 or not out_path.is_file():
+            out_path.unlink(missing_ok=True)
+            return None
+
+        # If compression didn't help enough, try again with lower resolution (480p)
+        if out_path.stat().st_size > target_bytes:
+            target_kbps2 = max(80, target_kbps // 2)
+            tmp2 = tempfile.NamedTemporaryFile(suffix="_compressed2.mp4", delete=False)
+            tmp2.close()
+            out_path2 = Path(tmp2.name)
+            cmd2 = [
+                "ffmpeg", "-y", "-i", str(src),
+                "-vf", "scale='min(854,iw)':'min(480,ih)':force_original_aspect_ratio=decrease",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "32",
+                "-b:v", f"{target_kbps2}k",
+                "-c:a", "aac", "-b:a", "48k",
+                "-movflags", "+faststart",
+                str(out_path2),
+            ]
+            result2 = subprocess.run(cmd2, capture_output=True, timeout=120)
+            out_path.unlink(missing_ok=True)
+            if result2.returncode == 0 and out_path2.is_file():
+                out_path = out_path2
+            else:
+                out_path2.unlink(missing_ok=True)
+                return None
+
+        return out_path
+    except Exception:
+        return None
+
+
+# DashScope local file path supports up to 100MB (per official docs)
+_DASHSCOPE_LOCAL_FILE_LIMIT = 100 * 1024 * 1024  # 100 MB
 
 
 def _analyze_clip_openai(
@@ -128,31 +220,61 @@ def _analyze_clip_openai(
     max_base64_bytes: int,
     extra_user_hint: str,
 ) -> dict[str, Any]:
-    try:
-        url = _video_to_data_url(clip_path, max_base64_bytes)
-    except FileTooLargeForBase64:
-        return _analyze_clip_dashscope(settings, model, clip_path, fps, extra_user_hint)
+    raw_limit = min(max_base64_bytes, int(_API_BASE64_HARD_LIMIT * 3 / 4))
+    file_size = clip_path.stat().st_size
+    compressed_tmp: Path | None = None
+    working_path = clip_path
 
-    user_content: list[dict[str, Any]] = [
-        {
-            "type": "video_url",
-            "video_url": {"url": url},
-            "fps": fps,
-        },
-        {
-            "type": "text",
-            "text": f"{USER_ANALYSIS_PROMPT}\n{extra_user_hint}",
-        },
-    ]
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": DIRECTOR_SYSTEM},
-            {"role": "user", "content": user_content},
-        ],
-    )
-    raw = completion.choices[0].message.content or ""
-    return _extract_json_object(raw)
+    if file_size > raw_limit:
+        # If under 100MB, skip compression entirely and go straight to dashscope local path
+        # (DashScope SDK local file path supports up to 100MB, much better than base64 10MB limit)
+        if file_size <= _DASHSCOPE_LOCAL_FILE_LIMIT:
+            return _analyze_clip_dashscope(settings, model, clip_path, fps, extra_user_hint)
+
+        # Over 100MB: try compression first to get under base64 limit for OpenAI-compat path
+        compressed_tmp = _compress_video_for_api(clip_path, _COMPRESS_TARGET_BYTES)
+        if compressed_tmp and compressed_tmp.stat().st_size <= raw_limit:
+            working_path = compressed_tmp
+        else:
+            # Compression failed or still too large → dashscope fallback
+            if compressed_tmp:
+                compressed_tmp.unlink(missing_ok=True)
+            return _analyze_clip_dashscope(settings, model, clip_path, fps, extra_user_hint)
+
+    try:
+        url = _video_to_data_url(working_path, max_base64_bytes)
+    except FileTooLargeForBase64:
+        if compressed_tmp:
+            compressed_tmp.unlink(missing_ok=True)
+        return _analyze_clip_dashscope(settings, model, clip_path, fps, extra_user_hint)
+    finally:
+        if compressed_tmp and compressed_tmp != working_path:
+            compressed_tmp.unlink(missing_ok=True)
+
+    try:
+        user_content: list[dict[str, Any]] = [
+            {
+                "type": "video_url",
+                "video_url": {"url": url},
+                "fps": fps,
+            },
+            {
+                "type": "text",
+                "text": f"{USER_ANALYSIS_PROMPT}\n{extra_user_hint}",
+            },
+        ]
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": DIRECTOR_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        raw = completion.choices[0].message.content or ""
+        return _extract_json_object(raw)
+    finally:
+        if compressed_tmp:
+            compressed_tmp.unlink(missing_ok=True)
 
 
 def _analyze_clip_dashscope(
@@ -166,11 +288,13 @@ def _analyze_clip_dashscope(
     from dashscope import MultiModalConversation
 
     dashscope.base_http_api_url = settings.dashscope_api_base
+    # DashScope SDK requires "file://" prefix for local file paths (per official docs)
+    video_file_uri = f"file://{clip_path.resolve()}"
     messages = [
         {
             "role": "user",
             "content": [
-                {"video": str(clip_path.resolve()), "fps": fps},
+                {"video": video_file_uri, "fps": fps},
                 {
                     "text": f"{DIRECTOR_SYSTEM}\n\n{USER_ANALYSIS_PROMPT}\n{extra_user_hint}"
                 },
@@ -484,12 +608,14 @@ def _run_full_video_dashscope_local_file(
     from dashscope import MultiModalConversation
 
     dashscope.base_http_api_url = settings.dashscope_api_base
+    # DashScope SDK requires "file://" prefix for local file paths (per official docs)
+    video_file_uri = f"file://{video_path.resolve()}"
     text = f"{DIRECTOR_SYSTEM}\n\n{_full_video_user_text(style_hint)}"
     messages = [
         {
             "role": "user",
             "content": [
-                {"video": str(video_path.resolve()), "fps": settings.analysis_fps},
+                {"video": video_file_uri, "fps": settings.analysis_fps},
                 {"text": text},
             ],
         }
@@ -555,22 +681,52 @@ def analyze_full_video_local(
     consolidate_result: bool = True,
 ) -> StoryboardDocument:
     """
-    整支本地视频一次调用模型：优先 OpenAI 兼容接口 + Base64；超过体积上限则改用
-    DashScope 本地文件路径（见百炼文档对本地视频的大小限制）。
+    整支本地视频一次调用模型：优先 OpenAI 兼容接口 + Base64。
+    超过 base64 体积限制时先尝试压缩，压缩后仍超限则改用 DashScope 本地文件路径。
     """
     path = Path(video_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"视频文件不存在: {path}")
     max_b64 = int(settings.max_video_base64_mb * 1024 * 1024)
+    raw_limit = min(max_b64, int(_API_BASE64_HARD_LIMIT * 3 / 4))
     client = OpenAI(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
+    compressed_tmp: Path | None = None
+    working_path = path
+    file_size = path.stat().st_size
+    if file_size > raw_limit:
+        # Under 100MB: skip compression, use dashscope local file path directly
+        if file_size <= _DASHSCOPE_LOCAL_FILE_LIMIT:
+            data = _run_full_video_dashscope_local_file(settings, path, style_hint)
+            doc = _storyboard_from_full_video_json(data, str(path))
+            if consolidate_result:
+                doc = consolidate_storyboard(doc, settings)
+            return doc
+
+        # Over 100MB: try to compress down to base64-compatible size
+        compressed_tmp = _compress_video_for_api(path, _COMPRESS_TARGET_BYTES)
+        if compressed_tmp and compressed_tmp.stat().st_size <= raw_limit:
+            working_path = compressed_tmp
+        else:
+            if compressed_tmp:
+                compressed_tmp.unlink(missing_ok=True)
+                compressed_tmp = None
+            # Compression failed → dashscope as last resort
+            data = _run_full_video_dashscope_local_file(settings, path, style_hint)
+            doc = _storyboard_from_full_video_json(data, str(path))
+            if consolidate_result:
+                doc = consolidate_storyboard(doc, settings)
+            return doc
     try:
-        data_url = _video_to_data_url(path, max_b64)
+        data_url = _video_to_data_url(working_path, max_b64)
         data = _run_full_video_openai(client, settings, data_url, style_hint)
     except FileTooLargeForBase64:
         data = _run_full_video_dashscope_local_file(settings, path, style_hint)
+    finally:
+        if compressed_tmp:
+            compressed_tmp.unlink(missing_ok=True)
     doc = _storyboard_from_full_video_json(data, str(path))
     if consolidate_result:
         doc = consolidate_storyboard(doc, settings)

@@ -37,7 +37,7 @@ STRICT REQUIREMENTS:
       "mood": "Emotional atmosphere in English. E.g.: melancholic, tense, euphoric",
       "lighting": "Lighting description in English. E.g.: Rembrandt lighting, soft backlight, neon rim light",
       "audio_description": "Music / sound effects / ambient sound (excluding dialogue) in English. E.g.: distant train rumble, melancholic piano melody",
-      "generation_prompt": "PURE ENGLISH. Single paragraph. Include shot scale, camera movement, subject action, lighting and mood keywords. E.g.: Medium close-up, eye-level, slow push-in. Young woman sits alone on a subway bench, glancing sideways with quiet unease. Soft overhead fluorescent light with cool blue cast. Melancholic mood.",
+      "generation_prompt": "PURE ENGLISH. Single paragraph. MUST start with the character's name if a character appears in this shot (e.g. 'Alex sits alone on a subway bench...' NOT 'A young woman sits...'). Formula: [character name if present] + [shot scale + angle + camera move] + subject action + light/mood keywords. E.g.: 'Alex, medium close-up, eye-level slow push-in, sits alone on a subway bench glancing sideways with quiet unease, soft overhead fluorescent light with cool blue cast, melancholic mood.'",
       "duration_sec": 4.0
     }
   ]
@@ -45,7 +45,7 @@ STRICT REQUIREMENTS:
 
 - shots are in narrative chronological order; duration_sec is a positive number in seconds, recommended 2–8 seconds per shot; total shot count must fall within the user-specified range.
 - EVERY text field must be in English. Dialogue must be in English — this video is intended for an international English-speaking audience.
-- generation_prompt: single English paragraph fed directly to a video generation model."""
+- generation_prompt: CRITICAL — always use the character's actual name (from the characters field) in the generation_prompt, never say "a man", "a woman", "the character" etc. Using the character's name is essential for maintaining visual consistency across shots."""
 
 
 NEXT_SHOT_SYSTEM = """You are a professional film screenwriter and storyboard director. The user will provide an existing shot list and overall story information. You need to write the next shot for the story.
@@ -64,12 +64,13 @@ STRICT REQUIREMENTS:
   "mood": "Emotional atmosphere in English",
   "lighting": "Lighting description in English",
   "audio_description": "Music / sound effects / ambient sound (excluding dialogue) in English",
-  "generation_prompt": "PURE ENGLISH. Single paragraph. Shot scale, camera move, subject action, lighting, mood keywords.",
+  "generation_prompt": "PURE ENGLISH. Single paragraph. MUST use the character's actual name if they appear. Formula: [character name] + [shot scale + camera move] + action + light/mood. E.g.: 'Sarah, wide shot, slow pull-back, stands at rain-soaked window, warm backlight against cold exterior, bittersweet longing.'",
   "duration_sec": 4.0
 }
 
 - The new shot must naturally connect with the existing story in plot and atmosphere.
-- ALL fields must be in English. This video targets an international English-speaking audience."""
+- ALL fields must be in English. This video targets an international English-speaking audience.
+- generation_prompt: CRITICAL — always use the character's actual name, never generic pronouns like "a man", "a woman", "the character"."""
 
 
 def _build_shots_from_theme_items(items: list[dict[str, Any]]) -> list[Shot]:

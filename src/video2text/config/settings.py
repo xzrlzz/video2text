@@ -81,7 +81,7 @@ class Settings:
     video_gen_model: str = "wan2.7-t2v"
     video_ref_model: str = "wan2.7-r2v"
     default_resolution: str = "1280*720"
-    max_video_base64_mb: float = 9.0
+    max_video_base64_mb: float = 7.0
     scene_detect_threshold: float = 27.0
     analysis_fps: float = 2.0
 

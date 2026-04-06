@@ -33,6 +33,8 @@ from video2text.services.wan_video import (
 
 _ROLE_VIDEO_LINE = re.compile(r"^视频\s*(\d+)\s*[：:]\s*(.*)$")
 _ROLE_IMAGE_LINE = re.compile(r"^图\s*(\d+)\s*[：:]\s*(.*)$")
+# t2v subject format: "character1: Name — description" or "character1: Name: description"
+_ROLE_CHAR_LINE = re.compile(r"^character\s*(\d+)\s*[：:]\s*(.*)$", re.IGNORECASE)
 _VAGUE_ROLE_BODY_MARKERS = (
     "见参考图主体",
     "见参考",
@@ -107,6 +109,10 @@ def build_wan_clip_tasks(
     multi_ref = n_v + n_i > 1
     do_filter = bool(per_chunk_reference_filter and multi_ref and has_refs)
 
+    # t2v per-chunk character filtering: parse character slots and filter per segment
+    t2v_chars = parse_t2v_character_lines(subj_list) if not has_refs else []
+    do_t2v_filter = bool(t2v_chars and len(t2v_chars) > 1)
+
     total_story_sec = sum(max(0.01, float(s.duration)) for s in shots)
     if poll_callback:
         if len(chunks) > 1:
@@ -117,6 +123,12 @@ def build_wan_clip_tasks(
         else:
             poll_callback(
                 f"单次生成（1 段，约 {max_seg_eff:.0f}s 内多镜头），总参考时长约 {total_story_sec:.1f}s。"
+            )
+        if do_t2v_filter:
+            names = [name for _, name, _ in t2v_chars]
+            poll_callback(
+                f"t2v 主体：{len(t2v_chars)} 个角色 ({', '.join(names)})；"
+                f"各段将按分镜文本自动筛选本段出现的角色描述。"
             )
 
     if has_refs:
@@ -145,6 +157,22 @@ def build_wan_clip_tasks(
                 enabled=True,
             )
             sb = subject_block_for_chunk_refs(sv, si, v_bodies, i_bodies, settings)
+        elif do_t2v_filter:
+            # t2v per-chunk: only include characters whose name appears in this chunk's text
+            blob = chunk_text_for_reference_match(chunk)
+            matched = [
+                (slot, name, desc) for slot, name, desc in t2v_chars
+                if name and name.lower() in blob.lower()
+            ]
+            # fallback: if nothing matched, include all characters
+            if not matched:
+                matched = t2v_chars
+            # renumber slots sequentially
+            char_lines = [
+                f"character{ni}: {name} — {desc}"
+                for ni, (_, name, desc) in enumerate(matched, start=1)
+            ]
+            sb = format_subject_prompt_block(char_lines)
         else:
             sv, si = list(range(n_v)), list(range(n_i))
             sb = subject_block
@@ -212,10 +240,43 @@ def reference_subject_lock_hint(settings: Settings, has_reference_media: bool) -
     )
 
 
+def parse_t2v_character_lines(
+    subject_descriptions: list[str],
+) -> list[tuple[str, str, str]]:
+    """
+    解析 t2v 格式的主体描述行: "character1: Name — description"
+    返回 [(slot_label, name, full_body), ...]，name 用于关键词匹配。
+    """
+    results: list[tuple[str, str, str]] = []
+    for line in subject_descriptions:
+        s = str(line).strip()
+        if not s:
+            continue
+        mc = _ROLE_CHAR_LINE.match(s)
+        if mc:
+            idx = mc.group(1)
+            body = mc.group(2).strip()
+            # 分离 "Name — desc" 或 "Name: desc"
+            sep_match = re.match(r"^([^—\-:]+?)\s*(?:—|-{1,2}|:)\s*(.+)$", body)
+            if sep_match:
+                name = sep_match.group(1).strip()
+                desc = sep_match.group(2).strip()
+            else:
+                name = body
+                desc = body
+            results.append((f"character{idx}", name, desc))
+    return results
+
+
+def is_t2v_subject_format(subject_descriptions: list[str]) -> bool:
+    """判断 subject_descriptions 是否为 t2v character 格式。"""
+    return any(_ROLE_CHAR_LINE.match(str(s).strip()) for s in subject_descriptions if s)
+
+
 def format_subject_prompt_block(descriptions: list[str]) -> str:
     """
-    将用户上传的参考主体描述（视频N: xxx / 图N: xxx）格式化为 prompt 前缀主体声明块。
-    只保留用户输入的主体和参考序号，不添加无关说明。
+    将用户上传的参考主体描述（视频N: xxx / 图N: xxx / characterN: Name — desc）
+    格式化为 prompt 前缀主体声明块。
     """
     lines = [t.strip() for t in descriptions if t and str(t).strip()]
     if not lines:

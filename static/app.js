@@ -668,6 +668,10 @@
       // dialogue 里的 @Name 高亮（只读展示，编辑区为普通 textarea）
       const dialogueDisplay = renderMentionChips(shot.dialogue || '', names);
 
+      // 找出本镜头出现的角色及其英文描述
+      const mentionedSubjects = (getTask(currentTaskId).subjects || [])
+        .filter(s => s.name && mentioned.includes(s.name) && s.description_en);
+
       card.innerHTML = `
         <header>
           <span>Shot ${shot.shot_id} · ${shot.duration}s · ${escapeHtml(shot.shot_type || '')}</span>
@@ -676,7 +680,10 @@
         <div class="scene-desc">${sceneHtml}</div>
         <label>对白 dialogue（英文，标明说话人，如 Alex: "Are you okay?"）</label>
         <textarea data-field="dialogue" data-idx="${idx}">${escapeHtml(shot.dialogue || '')}</textarea>
-        <label>generation_prompt（英文，视频画面指令）</label>
+        <div class="gp-label-row">
+          <label>generation_prompt（英文，视频画面指令）</label>
+          ${mentionedSubjects.length ? `<button class="btn-inject-subject ghost sm" data-idx="${idx}" title="将本镜头角色的详细描述前置注入到 generation_prompt，提升跨镜一致性">⚡ 注入角色描述</button>` : ''}
+        </div>
         <textarea data-field="generation_prompt" data-idx="${idx}">${escapeHtml(shot.generation_prompt || '')}</textarea>
         ${!hasPrompt ? '<div class="prompt-warn">⚠ 未填写，将使用场景描述自动生成</div>' : ''}`;
       c.appendChild(card);
@@ -684,12 +691,47 @@
     c.querySelectorAll('textarea').forEach(ta => {
       ta.onblur = scheduleSaveStoryboard;
       ta.oninput = () => {
-        // 动态隐藏警告
         const card = ta.closest('.shot-card');
         const warn = card && card.querySelector('.prompt-warn');
         if (warn && ta.dataset.field === 'generation_prompt') {
           warn.classList.toggle('hidden', ta.value.trim().length > 0);
         }
+      };
+    });
+
+    // 注入角色描述按钮
+    c.querySelectorAll('.btn-inject-subject').forEach(btn => {
+      btn.onclick = () => {
+        const idx = +btn.dataset.idx;
+        const t = getTask(currentTaskId);
+        const shot = t.storyboard && t.storyboard.shots[idx];
+        if (!shot) return;
+        const names = getSubjectNames(currentTaskId);
+        const shotText = [shot.dialogue, shot.character_action, shot.scene_description, shot.generation_prompt].join(' ');
+        const relevant = (t.subjects || []).filter(s => s.name && names.includes(s.name) &&
+          (shotText.includes(s.name) || shotText.includes('@' + s.name)) && s.description_en);
+        if (!relevant.length) { showToast('未找到本镜头相关角色描述', 'warning', 2000); return; }
+        // 构建前缀：[Character descriptions] Name: desc; Name2: desc2.
+        const prefix = '[Character descriptions] ' +
+          relevant.map(s => `${s.name}: ${s.description_en.trim()}`).join('; ') + '.';
+        const ta = btn.closest('.shot-card').querySelector('textarea[data-field="generation_prompt"]');
+        const existing = ta.value.trim();
+        // 若已有同样的前缀则不重复注入
+        if (existing.startsWith('[Character descriptions]')) {
+          // 替换旧前缀
+          const rest = existing.replace(/^\[Character descriptions\][^.]*\.\s*/, '');
+          ta.value = `${prefix} ${rest}`.trim();
+        } else {
+          ta.value = existing ? `${prefix} ${existing}` : prefix;
+        }
+        // 同步到 storyboard 并触发保存
+        if (t.storyboard.shots[idx]) t.storyboard.shots[idx].generation_prompt = ta.value;
+        scheduleSaveStoryboard();
+        // 隐藏警告
+        const warn = btn.closest('.shot-card').querySelector('.prompt-warn');
+        if (warn) warn.classList.add('hidden');
+        btn.textContent = '✓ 已注入';
+        setTimeout(() => { btn.textContent = '⚡ 注入角色描述'; }, 2000);
       };
     });
   }
@@ -839,10 +881,11 @@
     });
 
     if (textOnly) {
-      // 纯文生：从主体卡片的 description_en 自动构建 subject_lines
+      // 纯文生：从主体卡片构建 character1/character2 格式，方便后端做 per-chunk 筛选
+      // 格式: "character1: Name — description_en"（Name 用于分镜文本关键词匹配）
       const subjectLines = (t.subjects || [])
         .filter(s => s.name && s.description_en)
-        .map(s => `${s.name}: ${s.description_en.trim()}`);
+        .map((s, i) => `character${i + 1}: ${s.name.trim()} — ${s.description_en.trim()}`);
       return {
         task_id: currentTaskId,
         text_only_video: true,
@@ -1166,7 +1209,7 @@
         video_gen_model: $('#cfg-gen').value.trim(),
         video_ref_model: $('#cfg-ref').value.trim(),
         default_resolution: $('#cfg-res').value.trim(),
-        max_video_base64_mb: parseFloat($('#cfg-b64').value) || 9,
+        max_video_base64_mb: parseFloat($('#cfg-b64').value) || 7,
         scene_detect_threshold: parseFloat($('#cfg-thresh').value) || 27,
         analysis_fps: parseFloat($('#cfg-fps').value) || 2,
         max_segment_seconds: parseFloat($('#cfg-maxseg').value) || 15,
