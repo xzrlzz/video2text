@@ -389,6 +389,9 @@ def _shot_from_analysis_dict(
     t0, t1 = max(0.0, t0), max(0.0, t1)
     if t1 < t0:
         t0, t1 = t1, t0
+    raw_chars = item.get("characters_in_shot") or []
+    if isinstance(raw_chars, str):
+        raw_chars = [c.strip() for c in raw_chars.split(",") if c.strip()]
     return Shot(
         shot_id=shot_id,
         start_time=_sec_to_ts(t0),
@@ -403,6 +406,7 @@ def _shot_from_analysis_dict(
         lighting=str(item.get("lighting", "")),
         audio_description=str(item.get("audio_description", "")),
         generation_prompt=str(item.get("generation_prompt", "")),
+        characters_in_shot=list(raw_chars),
     )
 
 
@@ -495,21 +499,7 @@ def analyze_scene_segments(
             shot_counter += 1
             t0, t1 = ranges[j] if j < len(ranges) else (seg.start_sec, seg.end_sec)
             all_shots.append(
-                Shot(
-                    shot_id=shot_counter,
-                    start_time=_sec_to_ts(t0),
-                    end_time=_sec_to_ts(t1),
-                    duration=round(t1 - t0, 2),
-                    shot_type=str(item.get("shot_type", "")),
-                    camera_movement=str(item.get("camera_movement", "")),
-                    scene_description=str(item.get("scene_description", "")),
-                    character_action=str(item.get("character_action", "")),
-                    dialogue=str(item.get("dialogue", "")),
-                    mood=str(item.get("mood", "")),
-                    lighting=str(item.get("lighting", "")),
-                    audio_description=str(item.get("audio_description", "")),
-                    generation_prompt=str(item.get("generation_prompt", "")),
-                )
+                _shot_from_analysis_dict(shot_counter, item, t0, t1)
             )
 
     doc = StoryboardDocument(

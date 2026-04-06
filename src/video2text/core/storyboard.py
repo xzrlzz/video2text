@@ -23,12 +23,19 @@ class Shot:
     lighting: str
     audio_description: str
     generation_prompt: str = ""
+    characters_in_shot: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        if not d.get("characters_in_shot"):
+            d.pop("characters_in_shot", None)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Shot:
+        raw_chars = d.get("characters_in_shot") or []
+        if isinstance(raw_chars, str):
+            raw_chars = [c.strip() for c in raw_chars.split(",") if c.strip()]
         return cls(
             shot_id=int(d["shot_id"]),
             start_time=str(d.get("start_time", "00:00:00")),
@@ -43,6 +50,7 @@ class Shot:
             lighting=str(d.get("lighting", "")),
             audio_description=str(d.get("audio_description", "")),
             generation_prompt=str(d.get("generation_prompt", "")),
+            characters_in_shot=list(raw_chars),
         )
 
 
@@ -104,6 +112,8 @@ class StoryboardDocument:
         ]
         for s in self.shots:
             lines.append(f"### 镜头 {s.shot_id}（{s.start_time} → {s.end_time}，{s.duration:.1f}s）")
+            if s.characters_in_shot:
+                lines.append(f"- **出场角色**：{', '.join(s.characters_in_shot)}")
             lines.append(f"- **景别**：{s.shot_type}")
             lines.append(f"- **运镜**：{s.camera_movement}")
             lines.append(f"- **场景**：{s.scene_description}")

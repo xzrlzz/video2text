@@ -18,6 +18,10 @@
     <div class="header-actions">
       <button type="button" class="ghost" id="btn-history">历史任务</button>
       <button type="button" class="primary" id="btn-settings">设置</button>
+      <span id="user-display" style="font-size:12px;color:var(--muted);margin-left:6px;"></span>
+      <button type="button" class="ghost sm hidden" id="btn-users" style="font-size:11px;">用户管理</button>
+      <button type="button" class="ghost sm" id="btn-chpwd" style="font-size:11px;">改密</button>
+      <button type="button" class="ghost sm" id="btn-logout" style="font-size:11px;color:var(--danger);border-color:var(--danger);">登出</button>
     </div>
   </header>
 
@@ -127,6 +131,10 @@
         <div class="dropzone" id="drop-images">拖拽或点击上传主体参考图</div>
         <input type="file" id="input-images" class="hidden" accept="image/*" multiple />
         <div class="ref-list" id="list-images"></div>
+      </div>
+      <div id="textonly-subject-wrap" class="hidden">
+        <label>角色池（一行一个角色，格式：<code>角色名: 外貌描述</code>，<strong>请用英文</strong>。系统会自动根据分镜内容匹配并注入对应角色描述）</label>
+        <textarea id="textonly-subjects" placeholder="e.g.:&#10;Alice: female, 28, short black hair, white blouse, determined gaze&#10;Bob: male, 35, tall, brown jacket, warm smile"></textarea>
       </div>
     </div>
 
@@ -257,6 +265,60 @@
     <!-- 兼容旧 JS 引用 -->
     <button type="button" class="ghost hidden" id="btn-resume-ws">从列表恢复</button>
     <button type="button" class="ghost" id="btn-close-history" style="margin-top:16px;">关闭</button>
+  </aside>
+
+  <!-- 修改密码对话框 -->
+  <div class="drawer-overlay" id="overlay-chpwd"></div>
+  <aside class="drawer" id="drawer-chpwd">
+    <h3>修改密码</h3>
+    <label>旧密码</label>
+    <input type="password" id="chpwd-old" autocomplete="current-password" />
+    <label>新密码（至少 6 位）</label>
+    <input type="password" id="chpwd-new" autocomplete="new-password" />
+    <label>确认新密码</label>
+    <input type="password" id="chpwd-confirm" autocomplete="new-password" />
+    <div class="flex" style="margin-top:20px;">
+      <button type="button" class="primary" id="btn-save-chpwd">确认修改</button>
+      <button type="button" class="ghost" id="btn-close-chpwd">取消</button>
+    </div>
+  </aside>
+
+  <!-- 用户管理抽屉（仅管理员可见） -->
+  <div class="drawer-overlay" id="overlay-users"></div>
+  <aside class="drawer" id="drawer-users">
+    <h3>用户管理</h3>
+    <p class="hint">管理员可新增、删除用户或重置密码。角色：admin（管理员）/ user（普通用户）。</p>
+
+    <!-- 新增用户表单 -->
+    <div class="user-mgmt-form">
+      <div class="row" style="margin-bottom:8px;">
+        <div>
+          <label>用户名</label>
+          <input type="text" id="new-user-name" placeholder="字母/数字/下划线，2-32位" autocomplete="off" />
+        </div>
+        <div>
+          <label>密码</label>
+          <input type="password" id="new-user-pwd" placeholder="至少 6 位" autocomplete="new-password" />
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:end;">
+        <div style="flex:1;">
+          <label>角色</label>
+          <select id="new-user-role">
+            <option value="user">user（普通用户）</option>
+            <option value="admin">admin（管理员）</option>
+          </select>
+        </div>
+        <button type="button" class="primary sm" id="btn-create-user" style="height:40px;white-space:nowrap;">创建用户</button>
+      </div>
+    </div>
+
+    <hr style="border-color:var(--border);margin:18px 0;" />
+
+    <!-- 用户列表 -->
+    <div id="users-list"></div>
+
+    <button type="button" class="ghost" id="btn-close-users" style="margin-top:16px;">关闭</button>
   </aside>
 
   <script src="/static/app.js"></script>

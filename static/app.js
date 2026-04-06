@@ -48,6 +48,10 @@
       body: opts.body ? (opts.json ? JSON.stringify(opts.body) : opts.body) : undefined,
       method: opts.method || 'GET',
     }).then(async (r) => {
+      if (r.status === 401) {
+        window.location.href = '/login';
+        throw new Error('未登录');
+      }
       let data = null;
       try { data = await r.json(); } catch (_) { data = null; }
       if (!r.ok) {
@@ -940,6 +944,7 @@
     for (const f of files) fd.append('files', f);
     try {
       const r = await fetch('/api/upload/reference', { method: 'POST', body: fd });
+      if (r.status === 401) { window.location.href = '/login'; return; }
       const j = await r.json();
       if (!r.ok) { showToast(j.error || '上传失败'); return; }
       const t = getTask(currentTaskId);
@@ -1228,6 +1233,7 @@
           fd.append('style', $('#analyze-style').value);
           fd.append('segment_scenes', $('#segment-scenes').checked ? 'true' : 'false');
           const r = await fetch('/api/task/analyze', { method: 'POST', body: fd });
+          if (r.status === 401) { window.location.href = '/login'; return; }
           const j = await r.json().catch(() => ({}));
           if (!r.ok) { showToast(j.error || '上传失败'); return; }
         }
@@ -1370,6 +1376,7 @@
           fd.append('style', $('#analyze-style').value);
           fd.append('segment_scenes', $('#segment-scenes').checked ? 'true' : 'false');
           const r = await fetch('/api/task/analyze', { method: 'POST', body: fd });
+          if (r.status === 401) { window.location.href = '/login'; return; }
           const j = await r.json().catch(() => ({}));
           if (!r.ok) { showToast(j.error || '失败'); return; }
           connectSSE(currentTaskId);
@@ -1540,7 +1547,173 @@
     }
   }
 
+  // ── 用户认证 UI ──────────────────────────────────────────────────────────────
+  let _currentRole = 'user';
+
+  async function loadCurrentUser() {
+    try {
+      const r = await api('/auth/me');
+      if (r.username && $('#user-display')) {
+        $('#user-display').textContent = r.username;
+      }
+      _currentRole = r.role || 'user';
+      // 管理员显示用户管理按钮
+      const usersBtn = $('#btn-users');
+      if (usersBtn) usersBtn.classList.toggle('hidden', _currentRole !== 'admin');
+    } catch (_) {}
+  }
+
+  if ($('#btn-logout')) {
+    $('#btn-logout').onclick = async () => {
+      if (!confirm('确认登出？')) return;
+      try {
+        await fetch('/auth/logout', { method: 'POST' });
+      } catch (_) {}
+      window.location.href = '/login';
+    };
+  }
+
+  if ($('#btn-chpwd')) {
+    $('#btn-chpwd').onclick = () => openDrawer('chpwd');
+    $('#overlay-chpwd').onclick = () => closeDrawer('chpwd');
+    $('#btn-close-chpwd').onclick = () => closeDrawer('chpwd');
+  }
+
+  if ($('#btn-save-chpwd')) {
+    $('#btn-save-chpwd').onclick = async () => {
+      const oldPw = ($('#chpwd-old') || {}).value || '';
+      const newPw = ($('#chpwd-new') || {}).value || '';
+      const confirmPw = ($('#chpwd-confirm') || {}).value || '';
+      if (!oldPw || !newPw) { showToast('请填写旧密码和新密码', 'warning'); return; }
+      if (newPw !== confirmPw) { showToast('两次输入的新密码不一致', 'warning'); return; }
+      if (newPw.length < 6) { showToast('新密码至少 6 位', 'warning'); return; }
+      try {
+        await api('/auth/change-password', {
+          method: 'POST', json: true,
+          body: { old_password: oldPw, new_password: newPw },
+        });
+        showToast('密码修改成功', 'success', 3000);
+        closeDrawer('chpwd');
+        $('#chpwd-old').value = '';
+        $('#chpwd-new').value = '';
+        $('#chpwd-confirm').value = '';
+      } catch (e) {
+        showToast('修改失败：' + e.message, 'error', 5000);
+      }
+    };
+  }
+
+  // ── 用户管理（管理员） ───────────────────────────────────────────────────────
+  if ($('#btn-users')) {
+    $('#btn-users').onclick = () => { refreshUserList(); openDrawer('users'); };
+    $('#overlay-users').onclick = () => closeDrawer('users');
+    $('#btn-close-users').onclick = () => closeDrawer('users');
+  }
+
+  async function refreshUserList() {
+    const el = $('#users-list');
+    if (!el) return;
+    el.innerHTML = '<p class="hint">加载中…</p>';
+    try {
+      const { users } = await api('/auth/users');
+      el.innerHTML = '';
+      if (!users || !users.length) {
+        el.innerHTML = '<p class="hint">暂无用户</p>';
+        return;
+      }
+      users.forEach(u => {
+        const row = document.createElement('div');
+        row.className = 'user-row';
+        const isAdmin = u.role === 'admin';
+        row.innerHTML = `
+          <div class="user-row-info">
+            <span class="user-row-name">${escapeHtml(u.username)}</span>
+            <span class="user-row-role ${isAdmin ? 'role-admin' : 'role-user'}">${isAdmin ? '管理员' : '用户'}</span>
+          </div>
+          <div class="user-row-actions">
+            <button class="ghost sm ur-toggle-role" data-u="${escapeAttr(u.username)}" data-role="${u.role}" title="${isAdmin ? '降为普通用户' : '升为管理员'}">${isAdmin ? '降级' : '升级'}</button>
+            <button class="ghost sm ur-reset-pwd" data-u="${escapeAttr(u.username)}" title="重置密码">重置密码</button>
+            <button class="ghost sm danger ur-delete" data-u="${escapeAttr(u.username)}" title="删除用户">删除</button>
+          </div>`;
+        el.appendChild(row);
+      });
+
+      // 切换角色
+      el.querySelectorAll('.ur-toggle-role').forEach(btn => {
+        btn.onclick = async () => {
+          const name = btn.dataset.u;
+          const newRole = btn.dataset.role === 'admin' ? 'user' : 'admin';
+          const label = newRole === 'admin' ? '管理员' : '普通用户';
+          if (!confirm(`确认将 ${name} 设为${label}？`)) return;
+          try {
+            await api(`/auth/users/${encodeURIComponent(name)}/role`, {
+              method: 'PUT', json: true, body: { role: newRole },
+            });
+            showToast(`已将 ${name} 设为${label}`, 'success', 2500);
+            refreshUserList();
+          } catch (e) { showToast(e.message, 'error', 5000); }
+        };
+      });
+
+      // 重置密码
+      el.querySelectorAll('.ur-reset-pwd').forEach(btn => {
+        btn.onclick = async () => {
+          const name = btn.dataset.u;
+          const newPwd = prompt(`为 ${name} 设置新密码（至少 6 位）：`);
+          if (!newPwd) return;
+          if (newPwd.length < 6) { showToast('密码至少 6 位', 'warning'); return; }
+          try {
+            await api(`/auth/users/${encodeURIComponent(name)}/reset-password`, {
+              method: 'POST', json: true, body: { new_password: newPwd },
+            });
+            showToast(`已重置 ${name} 的密码`, 'success', 2500);
+          } catch (e) { showToast(e.message, 'error', 5000); }
+        };
+      });
+
+      // 删除用户
+      el.querySelectorAll('.ur-delete').forEach(btn => {
+        btn.onclick = async () => {
+          const name = btn.dataset.u;
+          if (!confirm(`确认删除用户 ${name}？此操作不可撤销。`)) return;
+          try {
+            await api(`/auth/users/${encodeURIComponent(name)}`, { method: 'DELETE' });
+            showToast(`已删除 ${name}`, 'success', 2500);
+            refreshUserList();
+          } catch (e) { showToast(e.message, 'error', 5000); }
+        };
+      });
+    } catch (e) {
+      el.innerHTML = `<p class="hint" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  // 创建用户
+  if ($('#btn-create-user')) {
+    $('#btn-create-user').onclick = async () => {
+      const name = ($('#new-user-name') || {}).value ? $('#new-user-name').value.trim() : '';
+      const pwd = ($('#new-user-pwd') || {}).value || '';
+      const role = ($('#new-user-role') || {}).value || 'user';
+      if (!name) { showToast('请输入用户名', 'warning'); return; }
+      if (!pwd || pwd.length < 6) { showToast('密码至少 6 位', 'warning'); return; }
+      try {
+        await api('/auth/users', {
+          method: 'POST', json: true,
+          body: { username: name, password: pwd, role },
+        });
+        showToast(`用户 ${name} 创建成功`, 'success', 3000);
+        $('#new-user-name').value = '';
+        $('#new-user-pwd').value = '';
+        $('#new-user-role').value = 'user';
+        refreshUserList();
+      } catch (e) {
+        showToast('创建失败：' + e.message, 'error', 5000);
+      }
+    };
+  }
+
   // ── 初始化 ───────────────────────────────────────────────────────────────────
+  loadCurrentUser();
   loadConfigForm();
   renderStatusBar();
   // 初次打开自动新建任务

@@ -29,6 +29,7 @@ STRICT REQUIREMENTS:
   "characters": "Main character names, personalities, and relationships in English; character names in dialogue must match these",
   "shots": [
     {
+      "characters_in_shot": ["character name 1", "character name 2"],
       "shot_type": "Shot scale: extreme wide / wide / medium / close / extreme close / macro, etc.",
       "camera_movement": "Angle + camera movement with speed, in English. E.g.: eye-level, slow push-in; overhead, fast pan left",
       "scene_description": "Environment, composition, key props in English. E.g.: dimly lit subway platform, rule-of-thirds framing, worn wooden bench in foreground",
@@ -44,6 +45,7 @@ STRICT REQUIREMENTS:
 }
 
 - shots are in narrative chronological order; duration_sec is a positive number in seconds, recommended 2–8 seconds per shot; total shot count must fall within the user-specified range.
+- characters_in_shot: an array of character names that appear in this shot. Use the EXACT names from the "characters" field. Empty array [] for shots with no characters (e.g. landscape, establishing shots). This is critical for downstream character-consistent video generation.
 - EVERY text field must be in English. Dialogue must be in English — this video is intended for an international English-speaking audience.
 - generation_prompt: CRITICAL — always use the character's actual name (from the characters field) in the generation_prompt, never say "a man", "a woman", "the character" etc. Using the character's name is essential for maintaining visual consistency across shots."""
 
@@ -56,6 +58,7 @@ STRICT REQUIREMENTS:
 - Output a single shot object with the following fields:
 
 {
+  "characters_in_shot": ["character name"],
   "shot_type": "Shot scale: extreme wide / wide / medium / close / extreme close / macro, etc.",
   "camera_movement": "Angle + camera movement with speed, in English",
   "scene_description": "Environment, composition, key props in English",
@@ -68,6 +71,7 @@ STRICT REQUIREMENTS:
   "duration_sec": 4.0
 }
 
+- characters_in_shot: array of character names present in this shot (use exact names from the existing characters list). Empty array [] if no characters.
 - The new shot must naturally connect with the existing story in plot and atmosphere.
 - ALL fields must be in English. This video targets an international English-speaking audience.
 - generation_prompt: CRITICAL — always use the character's actual name, never generic pronouns like "a man", "a woman", "the character"."""

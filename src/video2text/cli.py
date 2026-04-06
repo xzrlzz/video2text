@@ -24,6 +24,7 @@ from video2text.core.theme import generate_storyboard_from_theme
 from video2text.pipeline.generator import (
     assign_generation_prompts,
     generation_duration_cap,
+    parse_character_pool,
     reference_subject_lock_hint,
     run_storyboard_clip_generation,
 )
@@ -452,6 +453,12 @@ def cmd_generate(
                 + "；".join(parts)
             )
 
+    char_pool = None
+    if text_only_video and subjects_merged:
+        char_pool = parse_character_pool(subjects_merged)
+        if char_pool:
+            click.echo(f"角色池已解析：{', '.join(e.name for e in char_pool)}（共 {len(char_pool)} 个角色）")
+
     doc = StoryboardDocument.load_json(storyboard)
     assign_generation_prompts(
         doc,
@@ -460,6 +467,8 @@ def cmd_generate(
         subject_descriptions=subjects_merged,
         api_duration_cap=dur_cap,
         reference_hint=ref_hint,
+        character_pool=char_pool,
+        settings=settings,
     )
     if update_storyboard:
         Path(storyboard).write_text(
@@ -485,7 +494,7 @@ def cmd_generate(
         click.echo(
             f"生成模式：文生视频，模型 {settings.video_gen_model}（无参考图/视频，主体仅靠文字，跨段一致性弱于 r2v）。"
         )
-        if subjects_merged:
+        if subjects_merged and not char_pool:
             click.echo(
                 "提示：当前为文生模式；默认流程应为参考生。若需锁定长相/造型，请提供参考图/视频并去掉 --no-require-reference。"
             )
@@ -505,6 +514,7 @@ def cmd_generate(
         reference_video_urls=ref_videos_merged,
         reference_video_descriptions=ref_desc_merged,
         per_chunk_reference_filter=extras.per_chunk_reference_filter,
+        character_pool=char_pool,
         progress_callback=_cb,
         checkpoint_dir=None,
         output_video=Path(output),

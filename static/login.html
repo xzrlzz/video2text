@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>video2text · 登录</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0c0c0f;
+      --surface: #16161c;
+      --surface2: #1e1e26;
+      --border: #2a2a34;
+      --text: #e8e6f0;
+      --muted: #8b8798;
+      --primary: #7c6cf0;
+      --primary-dim: #5a4ad4;
+      --accent: #3dd6c6;
+      --danger: #f06b7c;
+      --success: #6bf0a0;
+      --radius: 12px;
+      --font: "DM Sans", system-ui, sans-serif;
+      --mono: "JetBrains Mono", monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-image:
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(124, 108, 240, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 50%, rgba(61, 214, 198, 0.06), transparent);
+    }
+    .login-card {
+      width: min(420px, calc(100vw - 40px));
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 4px);
+      padding: 40px 36px 36px;
+      box-shadow: 0 8px 48px rgba(0, 0, 0, 0.45);
+    }
+    .login-logo {
+      text-align: center;
+      font-weight: 700;
+      font-size: 1.4rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+    .login-logo span { color: var(--accent); }
+    .login-subtitle {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 32px;
+    }
+    label {
+      display: block;
+      margin: 16px 0 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    label:first-of-type { margin-top: 0; }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus { border-color: var(--primary); }
+    .login-btn {
+      width: 100%;
+      margin-top: 28px;
+      padding: 13px 0;
+      border: none;
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, var(--primary), var(--primary-dim));
+      color: #fff;
+      font-family: var(--font);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: filter 0.15s, opacity 0.15s;
+    }
+    .login-btn:hover { filter: brightness(1.1); }
+    .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .login-error {
+      margin-top: 16px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(240, 107, 124, 0.1);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      font-size: 13px;
+      display: none;
+    }
+    .login-error.show { display: block; }
+    .login-footer {
+      margin-top: 24px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-logo">video<span>2</span>text</div>
+    <div class="login-subtitle">请登录以继续使用</div>
+
+    <form id="login-form" autocomplete="on">
+      <label for="username">用户名</label>
+      <input type="text" id="username" name="username" autocomplete="username" autofocus required />
+
+      <label for="password">密码</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required />
+
+      <button type="submit" class="login-btn" id="login-btn">登 录</button>
+    </form>
+
+    <div class="login-error" id="login-error"></div>
+    <div class="login-footer">首次使用默认账号 admin / admin123，请登录后及时修改密码</div>
+  </div>
+
+  <script>
+    (function () {
+      const form = document.getElementById('login-form');
+      const btn = document.getElementById('login-btn');
+      const errEl = document.getElementById('login-error');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        errEl.classList.remove('show');
+        btn.disabled = true;
+        btn.textContent = '登录中…';
+
+        const username = document.getElementById('username').value.trim();
+        const password = document.getElementById('password').value;
+
+        try {
+          const res = await fetch('/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            window.location.href = '/';
+          } else {
+            errEl.textContent = data.error || '登录失败';
+            errEl.classList.add('show');
+          }
+        } catch (err) {
+          errEl.textContent = '网络错误：' + err.message;
+          errEl.classList.add('show');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '登 录';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

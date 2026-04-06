@@ -598,6 +598,52 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
   line-height: 1.6;
 }
 
+/* ── User management ── */
+.user-mgmt-form {
+  padding: 14px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.user-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  margin-bottom: 6px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  gap: 10px;
+}
+.user-row:hover { border-color: var(--primary); }
+.user-row-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.user-row-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.user-row-role {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.role-admin { background: rgba(124,108,240,0.2); color: var(--primary); }
+.role-user { background: var(--surface); color: var(--muted); }
+.user-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.user-row-actions button { font-size: 11px; padding: 4px 8px; }
+
 /* ── Misc ── */
 video { width: 100%; max-height: 420px; border-radius: var(--radius); background: #000; margin-top: 12px; }
 .hidden { display: none !important; }

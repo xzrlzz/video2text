@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -77,6 +78,7 @@ def build_wan_clip_tasks(
     reference_video_urls: list[str] | None,
     reference_video_descriptions: list[str] | None,
     per_chunk_reference_filter: bool,
+    character_pool: list[CharacterPoolEntry] | None = None,
     poll_callback: Callable[[str], None] | None = None,
 ) -> tuple[list[WanClipTask], list[list[Shot]], bool, int, int, bool]:
     """
@@ -102,6 +104,8 @@ def build_wan_clip_tasks(
             f"{subject_block}。{ref_hint}" if subject_block.strip() else ref_hint
         )
     chunks = chunk_shots_by_max_duration(shots, max_seg_eff)
+
+    pool = character_pool or []
 
     n_v, n_i = len(ref_v), len(ref_u)
     subj_list = list(subject_descriptions or [])
@@ -130,6 +134,11 @@ def build_wan_clip_tasks(
                 f"t2v 主体：{len(t2v_chars)} 个角色 ({', '.join(names)})；"
                 f"各段将按分镜文本自动筛选本段出现的角色描述。"
             )
+
+    if pool and poll_callback:
+        poll_callback(
+            f"角色池已加载 {len(pool)} 个角色，各段将按分镜内容自动匹配注入角色描述。"
+        )
 
     if has_refs:
         ref_u, ref_v = preflight_reference_urls_for_r2v(settings, ref_u, ref_v)
@@ -178,8 +187,15 @@ def build_wan_clip_tasks(
         else:
             sv, si = list(range(n_v)), list(range(n_i))
             sb = subject_block
+
+        char_block = ""
+        if pool:
+            matched = match_characters_for_chunk(chunk, pool, settings)
+            char_block = format_character_pool_block(matched)
+
         prompt, dur = build_wan_multi_shot_prompt(
-            chunk, style, sb, max_duration=dur_cap
+            chunk, style, sb, max_duration=dur_cap,
+            character_block=char_block,
         )
         cu = [ref_u[j] for j in si]
         cv = [ref_v[j] for j in sv]
@@ -284,6 +300,164 @@ def format_subject_prompt_block(descriptions: list[str]) -> str:
     if not lines:
         return ""
     return "[Reference subjects] " + "; ".join(lines) + "."
+
+
+@dataclass(frozen=True)
+class CharacterPoolEntry:
+    """角色池中的一条：角色名 + 外貌/特征描述。"""
+    name: str
+    description: str
+
+
+def parse_character_pool(lines: list[str]) -> list[CharacterPoolEntry]:
+    """
+    解析用户输入的角色池（纯文生时，一行一条）。
+    支持格式：
+      "Alice: tall woman, black hair, red dress"
+      "Alice, tall woman, black hair, red dress"  （首个逗号前当角色名）
+      "tall woman, black hair"  （无冒号/逗号分隔名 → 整行做描述，名字取前两个词）
+    """
+    pool: list[CharacterPoolEntry] = []
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            continue
+        if ":" in s or "：" in s:
+            sep = ":" if ":" in s else "："
+            name, desc = s.split(sep, 1)
+            name, desc = name.strip(), desc.strip()
+        elif "," in s:
+            name, desc = s.split(",", 1)
+            name, desc = name.strip(), desc.strip()
+        else:
+            name = s
+            desc = s
+        if name:
+            pool.append(CharacterPoolEntry(name=name, description=desc or name))
+    return pool
+
+
+def match_characters_for_chunk(
+    chunk: list[Shot],
+    pool: list[CharacterPoolEntry],
+    settings: Settings | None = None,
+) -> list[CharacterPoolEntry]:
+    """
+    确定一段 chunk 里应注入哪些角色描述。
+    优先级：
+      1. 镜头上已有 characters_in_shot 标注 → 按名字精确/模糊匹配
+      2. 关键字在 generation_prompt / character_action / dialogue 中出现 → 匹配
+      3. 以上都不命中且有 settings → 调 LLM 判断
+      4. 无法判断 → 返回全量池（保守策略）
+    """
+    if not pool:
+        return []
+
+    matched_indices: set[int] = set()
+
+    annotated_names: set[str] = set()
+    for shot in chunk:
+        for n in shot.characters_in_shot:
+            annotated_names.add(n.strip().lower())
+
+    if annotated_names:
+        for i, entry in enumerate(pool):
+            en = entry.name.strip().lower()
+            for an in annotated_names:
+                if en in an or an in en:
+                    matched_indices.add(i)
+
+    if not matched_indices:
+        blob = _chunk_text_blob(chunk)
+        blob_lower = blob.lower()
+        for i, entry in enumerate(pool):
+            name_lower = entry.name.strip().lower()
+            if len(name_lower) >= 2 and name_lower in blob_lower:
+                matched_indices.add(i)
+            else:
+                for kw in _keywords_from_role_body(entry.description):
+                    if len(kw) >= 3 and kw.lower() in blob_lower:
+                        matched_indices.add(i)
+                        break
+
+    if not matched_indices and settings:
+        try:
+            matched_indices = _llm_match_characters(chunk, pool, settings)
+        except Exception:
+            pass
+
+    if not matched_indices:
+        return list(pool)
+
+    return [pool[i] for i in sorted(matched_indices)]
+
+
+def _chunk_text_blob(chunk: list[Shot]) -> str:
+    parts: list[str] = []
+    for s in chunk:
+        for field in (
+            s.generation_prompt,
+            s.scene_description,
+            s.character_action,
+            s.dialogue,
+            s.mood,
+        ):
+            if field and str(field).strip():
+                parts.append(str(field).strip())
+    return "\n".join(parts)
+
+
+def _llm_match_characters(
+    chunk: list[Shot],
+    pool: list[CharacterPoolEntry],
+    settings: Settings,
+) -> set[int]:
+    """调用 LLM 判断 chunk 中出现了池里哪些角色，返回匹配的下标集合。"""
+    from openai import OpenAI
+
+    blob = _chunk_text_blob(chunk)
+    names = [e.name for e in pool]
+    system = (
+        "You are given a set of shot descriptions from a storyboard and a list of character names. "
+        "Return a JSON array of character names that appear or are referenced in the shots. "
+        "Output strict JSON only — an array of strings, e.g. [\"Alice\", \"Bob\"]. "
+        "If none match, return []."
+    )
+    user = (
+        f"Character pool:\n{json.dumps(names)}\n\n"
+        f"Shots text:\n{blob[:3000]}"
+    )
+    client = OpenAI(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.base_url,
+    )
+    model = (settings.theme_story_model or settings.vision_model).strip()
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    raw = (completion.choices[0].message.content or "").strip()
+    arr = json.loads(raw) if raw.startswith("[") else []
+    if not isinstance(arr, list):
+        return set()
+    matched: set[int] = set()
+    for item in arr:
+        item_lower = str(item).strip().lower()
+        for i, entry in enumerate(pool):
+            if entry.name.strip().lower() == item_lower:
+                matched.add(i)
+    return matched
+
+
+def format_character_pool_block(entries: list[CharacterPoolEntry]) -> str:
+    """将匹配到的角色描述格式化为 prompt 前缀块。"""
+    if not entries:
+        return ""
+    parts = [f"{e.name}: {e.description}" for e in entries]
+    return "[Character descriptions] " + "; ".join(parts) + "."
 
 
 def chunk_text_for_reference_match(chunk: list[Shot]) -> str:
@@ -467,14 +641,11 @@ def build_wan_multi_shot_prompt(
     style: str,
     subject_block: str = "",
     max_duration: int = 15,
+    character_block: str = "",
 ) -> tuple[str, int]:
     """
-    构建万相多镜头 prompt（简化版）。
-    结构：[主体声明] [风格] [第N个镜头 generation_prompt。对白：xxx]
-    - generation_prompt 由用户在 UI 里填写（英文），是核心视觉指令
-    - dialogue 单独作为对白标注附加，不混入视觉描述
-    - 不注入 title/synopsis（叙事层不应进入视频生成 prompt）
-    - 无 generation_prompt 时，仅用 scene_description + character_action 作 fallback
+    构建万相多镜头 prompt。
+    结构：[角色描述] [主体声明] [风格] [第N个镜头 generation_prompt。对白：xxx]
     """
     target = _chunk_target_duration(chunk, max_duration)
     target = max(target, len(chunk))
@@ -484,6 +655,8 @@ def build_wan_multi_shot_prompt(
         raise ValueError("lens allocation mismatch")
 
     prefix_parts: list[str] = []
+    if character_block.strip():
+        prefix_parts.append(character_block.strip())
     if subject_block.strip():
         prefix_parts.append(subject_block.strip())
     if style.strip():
@@ -498,10 +671,6 @@ def build_wan_multi_shot_prompt(
         if gp:
             visual = gp
         else:
-            # Fallback: build an English description from available fields.
-            # Use shot_type and mood as English-safe fields; scene_description/character_action
-            # may be Chinese so we only include them as-is (the video model accepts mixed input
-            # as a last resort, but ideally generation_prompt should always be filled in English).
             fallback_parts = [
                 x for x in (shot.scene_description, shot.character_action) if x and x.strip()
             ]
@@ -525,6 +694,8 @@ def assign_generation_prompts(
     subject_descriptions: list[str] | None = None,
     api_duration_cap: int = 15,
     reference_hint: str = "",
+    character_pool: list[CharacterPoolEntry] | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """为仍缺 generation_prompt 的镜头填入本段万相合成 prompt（与分段逻辑一致）。"""
     shots = doc.shots
@@ -534,12 +705,18 @@ def assign_generation_prompts(
     rh = (reference_hint or "").strip()
     if rh:
         block = f"{block}{rh}" if block.strip() else rh
+    pool = character_pool or []
     chunk_max = max(
         2.0, min(float(max_segment_seconds), float(api_duration_cap))
     )
     for chunk in chunk_shots_by_max_duration(shots, chunk_max):
+        char_block = ""
+        if pool:
+            matched = match_characters_for_chunk(chunk, pool, settings)
+            char_block = format_character_pool_block(matched)
         prompt, _ = build_wan_multi_shot_prompt(
-            chunk, style, block, max_duration=api_duration_cap
+            chunk, style, block, max_duration=api_duration_cap,
+            character_block=char_block,
         )
         for s in chunk:
             if not s.generation_prompt.strip():
@@ -646,6 +823,7 @@ def generate_all_clips(
     reference_video_urls: list[str] | None = None,
     reference_video_descriptions: list[str] | None = None,
     per_chunk_reference_filter: bool = True,
+    character_pool: list[CharacterPoolEntry] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> list[tuple[str, int]]:
     """
@@ -674,6 +852,7 @@ def generate_all_clips(
         reference_video_urls=reference_video_urls,
         reference_video_descriptions=reference_video_descriptions,
         per_chunk_reference_filter=per_chunk_reference_filter,
+        character_pool=character_pool,
         poll_callback=poll_callback,
     )
 
@@ -744,6 +923,7 @@ def run_checkpointed_storyboard_generation(
     reference_video_urls: list[str],
     reference_video_descriptions: list[str],
     per_chunk_reference_filter: bool = True,
+    character_pool: list[CharacterPoolEntry] | None = None,
     progress_cb: Callable[[str], None],
     meta_update: Callable[[dict[str, Any]], None] | None = None,
     max_workers: int = 2,
@@ -770,6 +950,7 @@ def run_checkpointed_storyboard_generation(
         reference_video_urls=reference_video_urls,
         reference_video_descriptions=reference_video_descriptions,
         per_chunk_reference_filter=per_chunk_reference_filter,
+        character_pool=character_pool,
         poll_callback=progress_cb,
     )
 
@@ -866,6 +1047,7 @@ def run_storyboard_clip_generation(
     reference_video_urls: list[str] | None = None,
     reference_video_descriptions: list[str] | None = None,
     per_chunk_reference_filter: bool = True,
+    character_pool: list[CharacterPoolEntry] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     checkpoint_dir: Path | None = None,
     output_video: str | Path | None = None,
@@ -906,6 +1088,7 @@ def run_storyboard_clip_generation(
             reference_video_urls=ref_v,
             reference_video_descriptions=ref_d,
             per_chunk_reference_filter=per_chunk_reference_filter,
+            character_pool=character_pool,
             progress_cb=cb,
             meta_update=meta_update,
             max_workers=max_workers,
@@ -932,6 +1115,7 @@ def run_storyboard_clip_generation(
         reference_video_urls=ref_v,
         reference_video_descriptions=ref_d,
         per_chunk_reference_filter=per_chunk_reference_filter,
+        character_pool=character_pool,
         cancel_event=cancel_event,
     )
 

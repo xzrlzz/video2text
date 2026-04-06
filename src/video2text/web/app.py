@@ -40,9 +40,12 @@ from video2text.pipeline.generator import (
     CancellationError,
     assign_generation_prompts,
     generation_duration_cap,
+    parse_character_pool,
     reference_subject_lock_hint,
     run_storyboard_clip_generation,
 )
+
+from video2text.web.auth import init_auth
 
 WORKSPACE = get_workspace_dir()
 STATIC = get_static_dir()
@@ -54,6 +57,8 @@ TASK_TTL_DAYS = 7
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB uploads
+
+init_auth(app)
 
 _tasks_lock = threading.Lock()
 _active_threads: dict[str, threading.Thread] = {}
@@ -465,9 +470,13 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         ]
         subject_lines = [str(x).strip() for x in (params.get("subject_lines") or []) if str(x).strip()]
 
+        char_pool = None
         if text_only:
             ref_images, ref_videos = [], []
             ref_video_descs = []
+            char_pool = parse_character_pool(subject_lines)
+            if char_pool:
+                log(f"角色池已解析：{', '.join(e.name for e in char_pool)}（共 {len(char_pool)} 个角色）")
         else:
             if not ref_images and not ref_videos and extras.require_reference:
                 raise ValueError(
@@ -498,6 +507,8 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             subject_descriptions=subject_lines,
             api_duration_cap=dur_cap,
             reference_hint=ref_hint,
+            character_pool=char_pool,
+            settings=settings,
         )
         sb.write_text(
             json.dumps(doc.to_dict(), ensure_ascii=False, indent=2),
@@ -521,6 +532,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             reference_video_urls=ref_videos,
             reference_video_descriptions=ref_video_descs,
             per_chunk_reference_filter=extras.per_chunk_reference_filter,
+            character_pool=char_pool,
             progress_callback=log,
             checkpoint_dir=td / "segments",
             output_video=td / "output.mp4",
@@ -1141,8 +1153,18 @@ def main() -> None:
     _ensure_workspace()
     _ensure_config_file()
     _cleanup_old_tasks()
-    print("video2text Web UI: http://127.0.0.1:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    import socket
+    local_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    print(f"video2text Web UI: http://127.0.0.1:8000  (本机)")
+    print(f"                   http://{local_ip}:8000  (局域网)")
+    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
