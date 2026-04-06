@@ -41,7 +41,10 @@
 
       <!-- 主题创作面板 -->
       <div id="panel-theme">
-        <label>故事主题 / 创意</label>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <label style="margin-bottom:0;">故事主题 / 创意</label>
+          <button type="button" class="ghost sm" id="btn-gen-idea" style="white-space:nowrap;flex-shrink:0;">✨ 生成创意</button>
+        </div>
         <textarea id="theme-text" placeholder="例如：两个陌生人在末班地铁上因一把伞相识…"></textarea>
         <div class="row">
           <div>
@@ -148,8 +151,11 @@
       <p class="hint">已生成的片段缓存在 workspace，中断后可继续生成；并发数越高速度越快但 API 压力越大。</p>
       <div class="row">
         <div>
-          <label>生成风格（可选）</label>
-          <input type="text" id="gen-style" />
+          <label>生成风格（可选）<span class="hint" style="font-size:11px;margin-left:6px;">· 与分镜风格自动同步</span></label>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input type="text" id="gen-style" style="flex:1;" />
+            <button type="button" class="ghost sm" id="btn-sync-style" title="将此风格同步保存到当前任务，分镜生成也将使用此风格">保存同步</button>
+          </div>
         </div>
         <div>
           <label>分辨率（可选）</label>
@@ -214,6 +220,8 @@
     <input type="text" id="cfg-vision" />
     <label>theme_story_model</label>
     <input type="text" id="cfg-theme-model" />
+    <label>theme_idea_model <span style="font-weight:normal;color:var(--muted);font-size:11px;">（「生成创意」按钮专用模型，空则用 theme_story_model）</span></label>
+    <input type="text" id="cfg-idea-model" />
     <label>video_gen_model</label>
     <input type="text" id="cfg-gen" />
     <label>video_ref_model</label>

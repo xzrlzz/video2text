@@ -159,6 +159,12 @@
     $('#task-id-display').textContent = id;
     renderHint(t.meta);
 
+    // 回填已保存的风格到各输入框
+    const savedStyle = t.meta.style || '';
+    if ($('#gen-style')) $('#gen-style').value = savedStyle;
+    if ($('#theme-style')) $('#theme-style').value = savedStyle;
+    if ($('#analyze-style')) $('#analyze-style').value = savedStyle;
+
     // 主体卡片：先用缓存立即渲染，再后台拉新数据（避免空白等待）
     renderSubjects();
     loadSubjects(id);
@@ -261,6 +267,16 @@
 
         // 分镜就绪时立即拉取最新 storyboard 刷新预览
         if (data.status === 'storyboard_ready') {
+          // 把服务端返回的 style 回填到输入框（强制统一风格）
+          if (data.style !== undefined) {
+            const t2 = getTask(task_id);
+            t2.meta.style = data.style;
+            if (task_id === currentTaskId) {
+              if ($('#gen-style')) $('#gen-style').value = data.style;
+              if ($('#theme-style')) $('#theme-style').value = data.style;
+              if ($('#analyze-style')) $('#analyze-style').value = data.style;
+            }
+          }
           refreshTaskOnce(task_id);
           if (task_id === currentTaskId) {
             showToast(`分镜已生成（${data.shot_count || '?'} 镜），请查看步骤 3 预览`, 'success', 4000);
@@ -314,6 +330,12 @@
       const t = getTask(task_id);
       t.meta = { ...t.meta, ...st };
       delete t.meta.storyboard;
+      // 回填统一风格到输入框
+      if (st.style !== undefined && task_id === currentTaskId) {
+        if ($('#gen-style')) $('#gen-style').value = st.style || '';
+        if ($('#theme-style')) $('#theme-style').value = st.style || '';
+        if ($('#analyze-style')) $('#analyze-style').value = st.style || '';
+      }
 
       if (st.storyboard && JSON.stringify(st.storyboard) !== t.storyboardSig) {
         t.storyboard = st.storyboard;
@@ -350,13 +372,39 @@
     }
   }
 
+  // ── 时间格式化（UTC → 本地时区，HH:MM:SS） ──────────────────────────────────
+  function formatLogTime(isoStr) {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return isoStr.slice(11, 19) || '';
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${hh}:${mm}:${ss}`;
+    } catch (_) {
+      return isoStr.slice(11, 19) || '';
+    }
+  }
+
+  function formatDateTime(isoStr) {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return isoStr.slice(0, 19);
+      return d.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+    } catch (_) {
+      return isoStr.slice(0, 19);
+    }
+  }
+
   // ── 进度渲染 ────────────────────────────────────────────────────────────────
   function renderProgress(meta) {
     const log = $('#progress-log');
     const lines = (meta.progress || []).map(p =>
-      `<div>[${(p.t || '').slice(11, 19)}] ${escapeHtml(p.msg)}</div>`
+      `<div>[${formatLogTime(p.t)}] ${escapeHtml(p.msg)}</div>`
     );
-    // 错误信息当作最后一条普通日志行插入，不单独钉底
+    // 错误信息追加在日志末尾（正常顺序，不钉底部）
     if (meta.error && meta.status === 'failed') {
       lines.push(`<div class="log-error">✗ ${escapeHtml(meta.error)}</div>`);
     }
@@ -958,6 +1006,29 @@
 
   // ── 按钮事件 ─────────────────────────────────────────────────────────────────
 
+  // 一键生成主题创意
+  if ($('#btn-gen-idea')) {
+    $('#btn-gen-idea').onclick = async () => {
+      const btn = $('#btn-gen-idea');
+      btn.disabled = true;
+      btn.textContent = '生成中…';
+      try {
+        const style = ($('#theme-style') || {}).value ? $('#theme-style').value.trim() : '';
+        const result = await api('/api/task/theme/generate-idea', {
+          method: 'POST', json: true, body: { style },
+        });
+        if (result.idea) {
+          $('#theme-text').value = result.idea;
+        }
+      } catch (e) {
+        showToast('生成创意失败：' + e.message, 'error', 5000);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '✨ 生成创意';
+      }
+    };
+  }
+
   // 生成分镜
   if ($('#btn-theme')) {
     $('#btn-theme').onclick = async () => {
@@ -1094,6 +1165,25 @@
     };
   }
 
+  // 风格同步：将 gen-style 的值同步到 task 元数据，并回填到 theme-style / analyze-style
+  if ($('#btn-sync-style')) {
+    $('#btn-sync-style').onclick = async () => {
+      if (!currentTaskId) { showToast('请先新建或选择任务', 'warning'); return; }
+      const styleVal = ($('#gen-style') || {}).value ? $('#gen-style').value.trim() : '';
+      try {
+        await api('/api/task/style/' + currentTaskId, {
+          method: 'PUT', json: true, body: { style: styleVal },
+        });
+        // 同步到分镜风格输入框
+        if ($('#theme-style')) $('#theme-style').value = styleVal;
+        if ($('#analyze-style')) $('#analyze-style').value = styleVal;
+        showToast('风格已同步保存', 'success', 2500);
+      } catch (e) {
+        showToast('风格同步失败：' + e.message, 'error', 4000);
+      }
+    };
+  }
+
   // 一步运行（主题+生成）
   if ($('#btn-run-theme')) {
     $('#btn-run-theme').onclick = async () => {
@@ -1176,6 +1266,7 @@
       set('api-base', c.dashscope_api_base);
       set('vision', c.vision_model);
       set('theme-model', c.theme_story_model);
+      set('idea-model', c.theme_idea_model);
       set('gen', c.video_gen_model);
       set('ref', c.video_ref_model);
       set('res', c.default_resolution);
@@ -1206,6 +1297,7 @@
         dashscope_api_base: $('#cfg-api-base').value.trim(),
         vision_model: $('#cfg-vision').value.trim(),
         theme_story_model: $('#cfg-theme-model').value.trim(),
+        theme_idea_model: ($('#cfg-idea-model') || {}).value ? $('#cfg-idea-model').value.trim() : '',
         video_gen_model: $('#cfg-gen').value.trim(),
         video_ref_model: $('#cfg-ref').value.trim(),
         default_resolution: $('#cfg-res').value.trim(),
@@ -1253,7 +1345,7 @@
             <strong style="font-size:13px;font-family:var(--mono)">${t.task_id}</strong>
             <span class="hi-status ${sc}">${statusLabel(t.status)}</span>
           </div>
-          <span class="hint" style="font-size:12px;">${(t.updated || '').slice(0, 19)} · ${t.shot_count ? t.shot_count + ' 镜' : ''}</span>
+          <span class="hint" style="font-size:12px;">${formatDateTime(t.updated)} · ${t.shot_count ? t.shot_count + ' 镜' : ''}</span>
           <div class="flex" style="margin-top:6px;">
             <button class="ghost sm hi-load">加载</button>
             <button class="ghost sm danger hi-delete" style="font-size:11px;">删除</button>
@@ -1306,4 +1398,6 @@
   // ── 初始化 ───────────────────────────────────────────────────────────────────
   loadConfigForm();
   renderStatusBar();
+  // 初次打开自动新建任务
+  createNewTask().catch(() => {});
 })();

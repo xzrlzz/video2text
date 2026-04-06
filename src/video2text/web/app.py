@@ -313,14 +313,21 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
         td = _task_dir(task_id)
         doc.save_json(td / "storyboard.json")
         doc.save_markdown(td / "storyboard.md")
+        style_used = str(params.get("style") or "").strip()
         _write_task_meta(
             task_id,
             {
                 "status": "storyboard_ready",
                 "shot_count": len(doc.shots),
+                "style": style_used,
             },
         )
-        _sse_push(task_id, {"type": "status", "status": "storyboard_ready", "shot_count": len(doc.shots)})
+        _sse_push(task_id, {
+            "type": "status",
+            "status": "storyboard_ready",
+            "shot_count": len(doc.shots),
+            "style": style_used,
+        })
         log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
         # 自动生成主体描述
         log("Generating character subject descriptions…")
@@ -399,14 +406,21 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
 
         doc.save_json(td / "storyboard.json")
         doc.save_markdown(td / "storyboard.md")
+        style_used = str(params.get("style") or "").strip()
         _write_task_meta(
             task_id,
             {
                 "status": "storyboard_ready",
                 "shot_count": len(doc.shots),
+                "style": style_used,
             },
         )
-        _sse_push(task_id, {"type": "status", "status": "storyboard_ready", "shot_count": len(doc.shots)})
+        _sse_push(task_id, {
+            "type": "status",
+            "status": "storyboard_ready",
+            "shot_count": len(doc.shots),
+            "style": style_used,
+        })
         log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
         # 自动生成主体描述
         log("Generating character subject descriptions…")
@@ -466,7 +480,9 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         max_seg = float(
             params.get("max_segment_seconds") or extras.max_segment_seconds
         )
-        style = str(params.get("style") or "")
+        # 优先用参数里的 style，其次用任务元数据里已保存的统一风格
+        meta_style = str(_read_task_meta(task_id).get("style") or "")
+        style = str(params.get("style") or meta_style or "")
         resolution = params.get("resolution") or None
         max_workers = int(params.get("max_workers") or 2)
 
@@ -577,6 +593,42 @@ def api_task_theme():
             409,
         )
     return jsonify({"ok": True, "task_id": task_id})
+
+
+@app.route("/api/task/theme/generate-idea", methods=["POST"])
+def api_task_theme_generate_idea():
+    """调用 LLM 生成一个随机的故事主题创意，供用户一键填充。"""
+    body = request.get_json(force=True, silent=True) or {}
+    style_hint = (body.get("style") or "").strip()
+    try:
+        settings = load_settings(str(CONFIG_PATH))
+        cfg = _get_config_for_api()
+        # 优先用专门配置的 theme_idea_model，否则回退到 theme_story_model / vision_model
+        use_model = (
+            cfg.get("theme_idea_model", "").strip()
+            or settings.theme_story_model
+            or settings.vision_model
+            or ""
+        ).strip()
+        client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
+        style_clause = f"，风格偏好：{style_hint}" if style_hint else ""
+        sys_prompt = (
+            "你是一位极具创意的故事策划师，擅长构思简洁而引人入胜的短视频故事主题。"
+            "每次仅输出一个故事主题/创意，用一到三句话描述，不要序号、不要额外说明。"
+            "内容要有情感张力、画面感强、适合视频表现。"
+        )
+        user_prompt = f"请随机生成一个全新的、独特的短视频故事主题创意{style_clause}。"
+        completion = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        idea = (completion.choices[0].message.content or "").strip()
+        return jsonify({"ok": True, "idea": idea})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/task/theme/next", methods=["POST"])
@@ -835,6 +887,17 @@ def api_files(task_id: str, subpath: str):
     return send_from_directory(
         parent.parent, parent.name, mimetype=mimetype, as_attachment=False
     )
+
+
+@app.route("/api/task/style/<task_id>", methods=["PUT"])
+def api_task_style_put(task_id: str):
+    """保存/更新任务的统一风格（style），供分镜与视频生成共用。"""
+    if not _task_dir(task_id).is_dir():
+        return jsonify({"error": "unknown task"}), 404
+    body = request.get_json(force=True, silent=True) or {}
+    style = str(body.get("style") or "").strip()
+    _write_task_meta(task_id, {"style": style})
+    return jsonify({"ok": True, "style": style})
 
 
 @app.route("/api/storyboard/<task_id>", methods=["PUT"])

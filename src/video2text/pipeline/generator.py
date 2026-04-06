@@ -159,6 +159,8 @@ def build_wan_clip_tasks(
             sb = subject_block_for_chunk_refs(sv, si, v_bodies, i_bodies, settings)
         elif do_t2v_filter:
             # t2v per-chunk: only include characters whose name appears in this chunk's text
+            # sv/si are empty because t2v has no reference images/videos
+            sv, si = [], []
             blob = chunk_text_for_reference_match(chunk)
             matched = [
                 (slot, name, desc) for slot, name, desc in t2v_chars

@@ -4,6 +4,7 @@
   "dashscope_api_base": "https://dashscope.aliyuncs.com/api/v1",
   "vision_model": "qwen3.6-plus",
   "theme_story_model": "",
+  "theme_idea_model": "",
   "video_gen_model": "wan2.7-t2v",
   "video_ref_model": "wan2.7-r2v",
   "default_resolution": "1280*720",
