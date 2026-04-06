@@ -693,6 +693,30 @@
     };
   }
 
+  // ── 分镜翻译缓存（idx -> {scene_zh, dialogue_zh, prompt_zh}）────────────────
+  let _shotTransCache = {};
+
+  async function translateShotField(idx, field, text) {
+    const cacheKey = `${currentTaskId}_${idx}_${field}`;
+    // 避免重复请求
+    if (_shotTransCache[cacheKey] === text) return;
+    const cardEl = $('#shots-container').querySelector(`.shot-card[data-shot-idx="${idx}"]`);
+    if (!cardEl) return;
+    const zhEl = cardEl.querySelector(`[data-zh="${field}"]`);
+    if (!zhEl) return;
+    zhEl.textContent = '翻译中…';
+    try {
+      const r = await api('/api/translate', {
+        method: 'POST', json: true, body: { text, target: 'zh' },
+      });
+      const result = r.result || '';
+      zhEl.textContent = result;
+      _shotTransCache[cacheKey] = text;
+    } catch (_) {
+      zhEl.textContent = '（翻译失败）';
+    }
+  }
+
   // ── 分镜编辑 ────────────────────────────────────────────────────────────────
   function renderShots() {
     const t = getTask(currentTaskId);
@@ -704,6 +728,7 @@
     sb.shots.forEach((shot, idx) => {
       const card = document.createElement('div');
       card.className = 'shot-card';
+      card.dataset.shotIdx = idx;
       const hasPrompt = (shot.generation_prompt || '').trim().length > 0;
 
       // 检测本镜中出现的角色
@@ -713,8 +738,6 @@
 
       // scene_description 里的 @Name 高亮
       const sceneHtml = renderMentionChips((shot.scene_description || '').slice(0, 200), names);
-      // dialogue 里的 @Name 高亮（只读展示，编辑区为普通 textarea）
-      const dialogueDisplay = renderMentionChips(shot.dialogue || '', names);
 
       // 找出本镜头出现的角色及其英文描述
       const mentionedSubjects = (getTask(currentTaskId).subjects || [])
@@ -723,9 +746,26 @@
       card.innerHTML = `
         <header>
           <span>Shot ${shot.shot_id} · ${shot.duration}s · ${escapeHtml(shot.shot_type || '')}</span>
-          <div class="shot-mentions">${chipsHtml}</div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="shot-mentions">${chipsHtml}</div>
+            <button class="btn-shot-translate ghost sm" data-sidx="${idx}" title="翻译本镜场景/对白/prompt 为中文" style="font-size:11px;padding:2px 7px;opacity:0.7;">🌐 译</button>
+          </div>
         </header>
         <div class="scene-desc">${sceneHtml}</div>
+        <div class="shot-zh-block hidden" data-zh-block="${idx}">
+          <div class="shot-zh-row">
+            <span class="shot-zh-label">场景（中）</span>
+            <span class="shot-zh-text" data-zh="scene">${escapeHtml(shot.scene_zh || '')}</span>
+          </div>
+          <div class="shot-zh-row">
+            <span class="shot-zh-label">对白（中）</span>
+            <span class="shot-zh-text" data-zh="dialogue">${escapeHtml(shot.dialogue_zh || '')}</span>
+          </div>
+          <div class="shot-zh-row">
+            <span class="shot-zh-label">画面指令（中）</span>
+            <span class="shot-zh-text" data-zh="prompt">${escapeHtml(shot.prompt_zh || '')}</span>
+          </div>
+        </div>
         <label>对白 dialogue（英文，标明说话人，如 Alex: "Are you okay?"）</label>
         <textarea data-field="dialogue" data-idx="${idx}">${escapeHtml(shot.dialogue || '')}</textarea>
         <div class="gp-label-row">
@@ -736,6 +776,38 @@
         ${!hasPrompt ? '<div class="prompt-warn">⚠ 未填写，将使用场景描述自动生成</div>' : ''}`;
       c.appendChild(card);
     });
+
+    // 翻译按钮：展开/翻译中文块
+    c.querySelectorAll('.btn-shot-translate').forEach(btn => {
+      btn.onclick = async () => {
+        const idx = +btn.dataset.sidx;
+        const t2 = getTask(currentTaskId);
+        const shot = t2.storyboard && t2.storyboard.shots[idx];
+        if (!shot) return;
+        const block = c.querySelector(`[data-zh-block="${idx}"]`);
+        if (!block) return;
+        const isHidden = block.classList.contains('hidden');
+        if (isHidden) {
+          block.classList.remove('hidden');
+          btn.textContent = '🌐 收起';
+          // 触发翻译（各字段独立，不阻塞）
+          if (shot.scene_description && !block.querySelector('[data-zh="scene"]').textContent.trim()) {
+            translateShotField(idx, 'scene', shot.scene_description);
+          }
+          if (shot.dialogue && !block.querySelector('[data-zh="dialogue"]').textContent.trim()) {
+            translateShotField(idx, 'dialogue', shot.dialogue);
+          }
+          const gpText = shot.generation_prompt || shot.scene_description || '';
+          if (gpText && !block.querySelector('[data-zh="prompt"]').textContent.trim()) {
+            translateShotField(idx, 'prompt', gpText);
+          }
+        } else {
+          block.classList.add('hidden');
+          btn.textContent = '🌐 译';
+        }
+      };
+    });
+
     c.querySelectorAll('textarea').forEach(ta => {
       ta.onblur = scheduleSaveStoryboard;
       ta.oninput = () => {
@@ -895,18 +967,61 @@
   setupDrop('drop-videos', 'input-videos', 'video');
   setupDrop('drop-images', 'input-images', 'image');
 
-  // 视频分析文件拖拽
+  // 视频分析文件拖拽（选择后显示内嵌播放器）
   const videoDrop = $('#video-drop');
   const videoFile = $('#video-file');
-  if (videoDrop && videoFile) {
+
+  function showAnalyzeVideoPreview(file) {
+    if (!file || !videoDrop) return;
+    const url = URL.createObjectURL(file);
+    videoDrop.innerHTML = '';
+    videoDrop.style.padding = '0';
+    videoDrop.style.cursor = 'default';
+    videoDrop.style.borderStyle = 'solid';
+    const vid = document.createElement('video');
+    vid.src = url;
+    vid.controls = true;
+    vid.style.cssText = 'width:100%;max-height:260px;display:block;border-radius:var(--radius);';
+    const changeBtn = document.createElement('button');
+    changeBtn.type = 'button';
+    changeBtn.className = 'ghost sm';
+    changeBtn.textContent = '重新选择';
+    changeBtn.style.cssText = 'margin:8px;font-size:12px;';
+    changeBtn.onclick = () => {
+      videoFile.value = '';
+      videoDrop.innerHTML = '拖拽视频到此处或点击选择（.mp4 等）';
+      videoDrop.style.padding = '';
+      videoDrop.style.cursor = '';
+      videoDrop.style.borderStyle = '';
+      URL.revokeObjectURL(url);
+      bindVideoDrop();
+    };
+    videoDrop.appendChild(vid);
+    videoDrop.appendChild(changeBtn);
+  }
+
+  function bindVideoDrop() {
+    if (!videoDrop || !videoFile) return;
     videoDrop.onclick = () => videoFile.click();
     videoDrop.ondragover = (e) => { e.preventDefault(); videoDrop.classList.add('drag'); };
     videoDrop.ondragleave = () => videoDrop.classList.remove('drag');
-    videoDrop.ondrop = (e) => { e.preventDefault(); videoDrop.classList.remove('drag'); videoFile.files = e.dataTransfer.files; };
+    videoDrop.ondrop = (e) => {
+      e.preventDefault();
+      videoDrop.classList.remove('drag');
+      const files = e.dataTransfer.files;
+      if (files && files[0]) {
+        // 把文件赋给 input（DataTransfer 方式）
+        const dt = new DataTransfer();
+        dt.items.add(files[0]);
+        videoFile.files = dt.files;
+        showAnalyzeVideoPreview(files[0]);
+      }
+    };
     videoFile.onchange = function() {
-      if (this.files[0]) videoDrop.textContent = '已选：' + this.files[0].name;
+      if (this.files[0]) showAnalyzeVideoPreview(this.files[0]);
     };
   }
+  bindVideoDrop();
 
   // ── 生成参数构建 ─────────────────────────────────────────────────────────────
   function buildGeneratePayload() {
@@ -963,7 +1078,8 @@
     $('#text-only').onchange = () => {
       const on = $('#text-only').checked;
       $('#ref-section').classList.toggle('hidden', on);
-      $('#textonly-subject-wrap').classList.toggle('hidden', !on);
+      const tw = $('#textonly-subject-wrap');
+      if (tw) tw.classList.toggle('hidden', !on);
     };
   }
 
@@ -1124,17 +1240,46 @@
     };
   }
 
-  // 开始/继续生成
+  // 开始/继续生成（含前置步骤检查）
   if ($('#btn-generate')) {
     $('#btn-generate').onclick = async () => {
       if (!currentTaskId) { showToast('请先新建任务并完成分镜'); return; }
       const t = getTask(currentTaskId);
+
+      // ── 前置步骤检查 ──
+      const issues = [];
+      // 1. 分镜检查
+      if (!t.storyboard || !(t.storyboard.shots || []).length) {
+        issues.push('⚠ 尚未生成分镜（步骤 1）');
+      }
+      // 2. 主体检查（纯文生时至少需有一个含英文描述的主体；参考生不强制）
+      const hasSubjectsWithDesc = (t.subjects || []).some(s => s.description_en && s.description_en.trim());
+      if (!t.storyboard || !(t.storyboard.shots || []).length) {
+        // 已在上面提示，不重复
+      } else if (!hasSubjectsWithDesc) {
+        // 有分镜但没有主体描述——警告但允许继续
+        issues.push('💡 主体描述为空（步骤 2），生成时将无法注入角色描述，可能影响跨镜一致性');
+      }
+
+      if (issues.length) {
+        // 区分阻塞性问题（无分镜）和警告（无主体描述）
+        const blocking = issues.filter(s => s.startsWith('⚠'));
+        if (blocking.length) {
+          showToast(blocking.join('\n'), 'error', 7000);
+          return;
+        }
+        // 仅警告：弹确认框
+        if (!confirm(issues.join('\n') + '\n\n是否仍要继续生成？')) return;
+      }
+
+      // ── 参考模式检查 ──
       if (!$('#text-only').checked) {
         if (!t.imageRefs.length && !t.videoRefs.length) {
           if (!confirm('未上传参考图/视频，将使用纯文生模式。继续？')) return;
           $('#text-only').checked = true;
           $('#ref-section').classList.add('hidden');
-          $('#textonly-subject-wrap').classList.remove('hidden');
+          const tw = $('#textonly-subject-wrap');
+          if (tw) tw.classList.remove('hidden');
         }
       }
       await preflightAndGenerate(buildGeneratePayload());
