@@ -33,12 +33,12 @@ STRICT REQUIREMENTS:
       "shot_type": "Shot scale: extreme wide / wide / medium / close / extreme close / macro, etc.",
       "camera_movement": "Angle + camera movement with speed, in English. E.g.: eye-level, slow push-in; overhead, fast pan left",
       "scene_description": "Environment, composition, key props in English. E.g.: dimly lit subway platform, rule-of-thirds framing, worn wooden bench in foreground",
-      "character_action": "Character actions and expressions in this shot, in English. E.g.: young woman glances sideways, fingers tighten around umbrella handle",
+      "character_action": "Detailed character actions, micro-expressions, and body language in this shot (no appearance/outfit details), in English. MUST include: (1) specific facial micro-expressions (e.g. slight frown, eyes narrowing, lip quivering, jaw clenching); (2) body language and gestures (e.g. fingers drumming on table, shoulders dropping, leaning forward); (3) movement quality (hesitant, fluid, abrupt). E.g.: young woman's eyes narrow with suspicion, her lips press into a thin line as her fingers tighten around the umbrella handle, shoulders tensing visibly",
       "dialogue": "Speaker name followed by line in English. E.g.: Alex: \"Are you okay?\" — or empty string \"\" if no dialogue",
       "mood": "Emotional atmosphere in English. E.g.: melancholic, tense, euphoric",
       "lighting": "Lighting description in English. E.g.: Rembrandt lighting, soft backlight, neon rim light",
       "audio_description": "Music / sound effects / ambient sound (excluding dialogue) in English. E.g.: distant train rumble, melancholic piano melody",
-      "generation_prompt": "PURE ENGLISH. Single paragraph. MUST start with the character's name if a character appears in this shot (e.g. 'Alex sits alone on a subway bench...' NOT 'A young woman sits...'). Formula: [character name if present] + [shot scale + angle + camera move] + subject action + light/mood keywords. E.g.: 'Alex, medium close-up, eye-level slow push-in, sits alone on a subway bench glancing sideways with quiet unease, soft overhead fluorescent light with cool blue cast, melancholic mood.'",
+      "generation_prompt": "PURE ENGLISH. Single paragraph. MUST start with the character's name if a character appears in this shot (e.g. 'Alex sits alone on a subway bench...' NOT 'A young woman sits...'). Formula: [character name if present] + [shot scale + angle + camera move] + subject action with micro-expressions and body language + light/mood keywords. Include specific expressions and gestures but NO appearance/outfit details. E.g.: 'Alex, medium close-up, eye-level slow push-in, sits alone on a subway bench, eyes darting sideways with quiet unease, fingers gripping the bench edge, jaw slightly clenched, soft overhead fluorescent light with cool blue cast, melancholic mood.'",
       "duration_sec": 4.0
     }
   ]
@@ -62,12 +62,12 @@ STRICT REQUIREMENTS:
   "shot_type": "Shot scale: extreme wide / wide / medium / close / extreme close / macro, etc.",
   "camera_movement": "Angle + camera movement with speed, in English",
   "scene_description": "Environment, composition, key props in English",
-  "character_action": "Character actions and expressions in this shot, in English",
+  "character_action": "Detailed character actions, micro-expressions, and body language (no appearance/outfit details), in English. Include specific facial expressions, gestures, and movement quality to make characters feel human and alive.",
   "dialogue": "Speaker: \"line in English\" — or empty string \"\" if no dialogue",
   "mood": "Emotional atmosphere in English",
   "lighting": "Lighting description in English",
   "audio_description": "Music / sound effects / ambient sound (excluding dialogue) in English",
-  "generation_prompt": "PURE ENGLISH. Single paragraph. MUST use the character's actual name if they appear. Formula: [character name] + [shot scale + camera move] + action + light/mood. E.g.: 'Sarah, wide shot, slow pull-back, stands at rain-soaked window, warm backlight against cold exterior, bittersweet longing.'",
+  "generation_prompt": "PURE ENGLISH. Single paragraph. MUST use the character's actual name if they appear. Formula: [character name] + [shot scale + camera move] + action with micro-expressions and body language (no appearance) + light/mood. E.g.: 'Sarah, wide shot, slow pull-back, stands at rain-soaked window with eyes glistening, one hand pressed against the glass, chin slightly trembling, warm backlight against cold exterior, bittersweet longing.'",
   "duration_sec": 4.0
 }
 

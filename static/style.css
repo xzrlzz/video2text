@@ -196,6 +196,14 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
   font-size: 11px;
   color: var(--muted);
 }
+.ref-item .ref-thumb-video,
+.ref-item .ref-thumb-img {
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--bg);
+}
 
 /* ── Toggle ── */
 .toggle-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -434,6 +442,23 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
+.pill-close {
+  cursor: pointer;
+  opacity: 0.35;
+  font-size: 13px;
+  line-height: 1;
+  margin-left: 2px;
+  transition: opacity 0.15s;
+}
+.pill-close:hover { opacity: 1; color: var(--danger); }
+.pill-cancel {
+  cursor: pointer;
+  opacity: 0.6;
+  font-size: 12px;
+  line-height: 1;
+  transition: opacity 0.15s;
+}
+.pill-cancel:hover { opacity: 1; }
 #statusbar-new-btn {
   margin-left: auto;
   flex-shrink: 0;

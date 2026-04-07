@@ -167,7 +167,7 @@
         </div>
         <div>
           <label>分辨率（可选）</label>
-          <input type="text" id="gen-resolution" placeholder="1280*720" />
+          <input type="text" id="gen-resolution" placeholder="720*1280" />
         </div>
       </div>
       <div class="row">
@@ -177,7 +177,7 @@
         </div>
         <div>
           <label>并发数（同时生成片段数）</label>
-          <input type="number" id="max-workers" value="2" min="1" max="8" step="1" />
+          <input type="number" id="max-workers" value="4" min="1" max="8" step="1" />
         </div>
       </div>
       <div class="flex" style="margin-top:16px;">
@@ -216,8 +216,8 @@
   <!-- 设置抽屉 -->
   <div class="drawer-overlay" id="overlay-settings"></div>
   <aside class="drawer" id="drawer-settings">
-    <h3>设置（写入 config.json）</h3>
-    <p class="hint">API Key 留空则不覆盖已有密钥。</p>
+    <h3>个人设置</h3>
+    <p class="hint">每个账号独立配置，互不影响。API Key 留空则不覆盖已有密钥。</p>
     <label>dashscope_api_key</label>
     <input type="password" id="cfg-key" autocomplete="off" />
     <label>base_url</label>

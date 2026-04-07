@@ -80,6 +80,16 @@ def _is_admin(username: str) -> bool:
     return u is not None and u.get("role") == ROLE_ADMIN
 
 
+def get_current_user() -> str | None:
+    """返回当前会话中的用户名，未登录则返回 None。"""
+    return session.get("user")
+
+
+def is_current_user_admin() -> bool:
+    user = get_current_user()
+    return user is not None and _is_admin(user)
+
+
 def _require_admin():
     """检查当前会话是否为管理员，否则返回 403 响应。返回 None 表示通过。"""
     user = session.get("user")

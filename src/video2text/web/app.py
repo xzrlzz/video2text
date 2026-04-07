@@ -25,6 +25,8 @@ from video2text.utils.paths import (
     get_config_example_path,
     get_default_config_path,
     get_static_dir,
+    get_user_config_path,
+    get_user_workspace_dir,
     get_workspace_dir,
 )
 from video2text.core.analyzer import (
@@ -45,7 +47,7 @@ from video2text.pipeline.generator import (
     run_storyboard_clip_generation,
 )
 
-from video2text.web.auth import init_auth
+from video2text.web.auth import get_current_user, init_auth, is_current_user_admin
 
 WORKSPACE = get_workspace_dir()
 STATIC = get_static_dir()
@@ -77,24 +79,75 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _ensure_workspace() -> None:
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
+def _require_user() -> str:
+    """获取当前登录用户名，未登录则 abort。"""
+    user = get_current_user()
+    if not user:
+        from flask import abort
+        abort(401)
+    return user
+
+
+def _ensure_workspace(username: str | None = None) -> None:
+    if username:
+        get_user_workspace_dir(username).mkdir(parents=True, exist_ok=True)
+    else:
+        WORKSPACE.mkdir(parents=True, exist_ok=True)
     STATIC.mkdir(parents=True, exist_ok=True)
 
 
-def _task_dir(task_id: str) -> Path:
+def _task_dir(task_id: str, owner: str | None = None) -> Path:
+    """返回任务目录。若提供 owner 则在用户工作区下查找；否则尝试自动查找。"""
+    if owner:
+        return get_user_workspace_dir(owner) / task_id
+    return _resolve_task_dir(task_id)
+
+
+def _resolve_task_dir(task_id: str) -> Path:
+    """在所有用户工作区下查找 task_id 对应的目录。"""
+    if not WORKSPACE.is_dir():
+        return WORKSPACE / task_id
+    for user_dir in WORKSPACE.iterdir():
+        if not user_dir.is_dir():
+            continue
+        td = user_dir / task_id
+        if td.is_dir():
+            return td
     return WORKSPACE / task_id
 
 
-def _read_task_meta(task_id: str) -> dict[str, Any]:
-    p = _task_dir(task_id) / "task.json"
+def _task_owner(task_id: str) -> str | None:
+    """从 task.json 中读取任务的 owner 字段。"""
+    meta = _read_task_meta(task_id)
+    return meta.get("owner")
+
+
+def _check_task_access(task_id: str, username: str) -> bool:
+    """检查用户是否有权限访问指定任务。管理员可访问所有任务。"""
+    td = _resolve_task_dir(task_id)
+    if not td.is_dir():
+        return False
+    meta_path = td / "task.json"
+    if not meta_path.is_file():
+        return False
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    owner = meta.get("owner", "")
+    if owner == username:
+        return True
+    if is_current_user_admin():
+        return True
+    return False
+
+
+def _read_task_meta(task_id: str, owner: str | None = None) -> dict[str, Any]:
+    p = _task_dir(task_id, owner) / "task.json"
     if not p.is_file():
         return {}
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _write_task_meta(task_id: str, data: dict[str, Any]) -> None:
-    d = _task_dir(task_id)
+def _write_task_meta(task_id: str, data: dict[str, Any], owner: str | None = None) -> None:
+    d = _task_dir(task_id, owner)
     d.mkdir(parents=True, exist_ok=True)
     p = d / "task.json"
     cur = {}
@@ -133,12 +186,55 @@ def _mask_key(key: str) -> str:
     return k[:4] + "…" + k[-4:]
 
 
-def _get_config_for_api() -> dict[str, Any]:
-    if not CONFIG_PATH.is_file():
-        if CONFIG_EXAMPLE.is_file():
-            return json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
-        return {}
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+def _get_global_config() -> dict[str, Any]:
+    """读取全局配置（作为用户配置的 fallback 默认值）。"""
+    if CONFIG_PATH.is_file():
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    if CONFIG_EXAMPLE.is_file():
+        return json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+    return {}
+
+
+def _get_user_config(username: str) -> dict[str, Any]:
+    """读取用户独立配置，不存在则返回空 dict。"""
+    p = get_user_config_path(username)
+    if p.is_file():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {}
+
+
+def _save_user_config(username: str, data: dict[str, Any]) -> None:
+    """保存用户独立配置文件。"""
+    p = get_user_config_path(username)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _get_config_for_api(username: str | None = None) -> dict[str, Any]:
+    """合并全局配置和用户配置，用户配置覆盖全局配置。"""
+    base = _get_global_config()
+    if username:
+        user_cfg = _get_user_config(username)
+        if user_cfg:
+            base.update(user_cfg)
+    return base
+
+
+def _get_user_config_path_for_settings(username: str) -> str:
+    """返回用户配置文件的路径字符串（供 load_settings 使用）。
+    合并全局配置与用户覆盖项，写入用户配置路径后返回。
+    如果用户无独立配置则回退全局配置。"""
+    user_path = get_user_config_path(username)
+    user_cfg = _get_user_config(username)
+    if not user_cfg:
+        return str(CONFIG_PATH)
+    merged = _get_global_config()
+    merged.update(user_cfg)
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    user_path.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return str(user_path)
 
 
 def _save_config_file(data: dict[str, Any]) -> None:
@@ -148,27 +244,30 @@ def _save_config_file(data: dict[str, Any]) -> None:
 
 
 def _cleanup_old_tasks() -> None:
-    """清理超过 TASK_TTL_DAYS 天未更新的任务目录。"""
+    """清理超过 TASK_TTL_DAYS 天未更新的任务目录（遍历所有用户子目录）。"""
     cutoff = datetime.now(timezone.utc) - timedelta(days=TASK_TTL_DAYS)
     if not WORKSPACE.is_dir():
         return
-    for d in WORKSPACE.iterdir():
-        if not d.is_dir():
+    for user_dir in WORKSPACE.iterdir():
+        if not user_dir.is_dir():
             continue
-        meta_path = d / "task.json"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            updated_str = meta.get("updated", "")
-            if updated_str:
-                updated = datetime.fromisoformat(updated_str)
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                if updated < cutoff:
-                    shutil.rmtree(d, ignore_errors=True)
-        except Exception:
-            pass
+        for d in user_dir.iterdir():
+            if not d.is_dir():
+                continue
+            meta_path = d / "task.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                updated_str = meta.get("updated", "")
+                if updated_str:
+                    updated = datetime.fromisoformat(updated_str)
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    if updated < cutoff:
+                        shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +281,8 @@ def index_page():
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    cfg = _get_config_for_api()
+    username = _require_user()
+    cfg = _get_config_for_api(username)
     safe = dict(cfg)
     if "dashscope_api_key" in safe and safe["dashscope_api_key"]:
         safe["dashscope_api_key_masked"] = _mask_key(str(safe["dashscope_api_key"]))
@@ -193,13 +293,16 @@ def api_config_get():
 
 @app.route("/api/config", methods=["POST"])
 def api_config_post():
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
-    cur = _get_config_for_api()
+    cur = _get_user_config(username)
+    if not cur:
+        cur = dict(_get_global_config())
     for k, v in body.items():
         if k == "dashscope_api_key" and (v is None or str(v).strip() == ""):
             continue
         cur[k] = v
-    _save_config_file(cur)
+    _save_user_config(username, cur)
     return jsonify({"ok": True})
 
 
@@ -209,9 +312,10 @@ def api_config_post():
 
 @app.route("/api/task/create", methods=["POST"])
 def api_task_create():
-    _ensure_workspace()
+    username = _require_user()
+    _ensure_workspace(username)
     task_id = uuid.uuid4().hex[:12]
-    d = _task_dir(task_id)
+    d = _task_dir(task_id, owner=username)
     d.mkdir(parents=True, exist_ok=True)
     (d / "references").mkdir(exist_ok=True)
     (d / "segments").mkdir(exist_ok=True)
@@ -219,20 +323,23 @@ def api_task_create():
         task_id,
         {
             "task_id": task_id,
+            "owner": username,
             "status": "created",
             "created": _iso_now(),
             "progress": [],
             "type": "pending",
             "params": {},
         },
+        owner=username,
     )
     return jsonify({"task_id": task_id})
 
 
 @app.route("/api/upload/reference", methods=["POST"])
 def api_upload_reference():
+    username = _require_user()
     task_id = request.form.get("task_id") or ""
-    if not task_id or not _task_dir(task_id).is_dir():
+    if not task_id or not _check_task_access(task_id, username):
         return jsonify({"error": "invalid task_id"}), 400
     ref_dir = _task_dir(task_id) / "references"
     ref_dir.mkdir(parents=True, exist_ok=True)
@@ -255,7 +362,24 @@ def api_upload_reference():
                 "kind": kind,
             }
         )
+    # 持久化参考文件列表到 task.json
+    meta = _read_task_meta(task_id)
+    ref_list = list(meta.get("reference_files", []))
+    ref_list.extend(saved)
+    _write_task_meta(task_id, {"reference_files": ref_list})
     return jsonify({"files": saved})
+
+
+@app.route("/api/task/references/<task_id>", methods=["PUT"])
+def api_task_references_put(task_id: str):
+    """更新参考文件的描述信息（前端编辑后保存）。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
+    body = request.get_json(force=True, silent=True) or {}
+    refs = body.get("reference_files", [])
+    _write_task_meta(task_id, {"reference_files": refs})
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -265,11 +389,12 @@ def api_upload_reference():
 @app.route("/api/task/preflight", methods=["POST"])
 def api_task_preflight():
     """生成前的快速配置校验，不做任何 API 调用。"""
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     task_id = body.get("task_id")
 
     issues: list[str] = []
-    cfg = _get_config_for_api()
+    cfg = _get_config_for_api(username)
 
     if not cfg.get("dashscope_api_key"):
         issues.append("未配置 dashscope_api_key，请在设置中填写")
@@ -292,6 +417,8 @@ def api_task_preflight():
 # ---------------------------------------------------------------------------
 
 def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
+    owner = params.get("_owner", "")
+
     def log(m: str) -> None:
         _append_progress(task_id, m)
 
@@ -299,7 +426,8 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
         _write_task_meta(task_id, {"status": "theme_running", "type": "theme"})
         _sse_push(task_id, {"type": "status", "status": "theme_running"})
         log("Storyboard generation started, loading config…")
-        settings = load_settings(str(CONFIG_PATH))
+        cfg_path = _get_user_config_path_for_settings(owner) if owner else str(CONFIG_PATH)
+        settings = load_settings(cfg_path)
         theme = (params.get("theme") or "").strip()
         if not theme:
             raise ValueError("主题为空")
@@ -334,7 +462,6 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
             "style": style_used,
         })
         log(f"Storyboard saved: {len(doc.shots)} shots → {td / 'storyboard.json'}")
-        # 自动生成主体描述
         log("Generating character subject descriptions…")
         try:
             subjects = _generate_subjects_from_storyboard(doc, settings)
@@ -351,6 +478,8 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
 
 
 def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
+    owner = params.get("_owner", "")
+
     def log(m: str) -> None:
         _append_progress(task_id, m)
 
@@ -358,7 +487,8 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
         _write_task_meta(task_id, {"status": "analyze_running", "type": "analyze"})
         _sse_push(task_id, {"type": "status", "status": "analyze_running"})
         log("Video analysis started, loading config…")
-        settings = load_settings(str(CONFIG_PATH))
+        cfg_path = _get_user_config_path_for_settings(owner) if owner else str(CONFIG_PATH)
+        settings = load_settings(cfg_path)
         td = _task_dir(task_id)
         consolidate_flag = not params.get("skip_consolidate")
         style = str(params.get("style") or "")
@@ -444,6 +574,8 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
 
 
 def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
+    owner = params.get("_owner", "")
+
     def log(m: str) -> None:
         _append_progress(task_id, m)
 
@@ -457,8 +589,9 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
 
         _write_task_meta(task_id, {"status": "generating"})
         _sse_push(task_id, {"type": "status", "status": "generating"})
-        settings = load_settings(str(CONFIG_PATH))
-        extras = load_generation_extras(str(CONFIG_PATH))
+        cfg_path = _get_user_config_path_for_settings(owner) if owner else str(CONFIG_PATH)
+        settings = load_settings(cfg_path)
+        extras = load_generation_extras(cfg_path)
 
         doc = StoryboardDocument.load_json(sb)
         text_only = bool(params.get("text_only_video"))
@@ -493,7 +626,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         meta_style = str(_read_task_meta(task_id).get("style") or "")
         style = str(params.get("style") or meta_style or "")
         resolution = params.get("resolution") or None
-        max_workers = int(params.get("max_workers") or 2)
+        max_workers = int(params.get("max_workers") or 4)
 
         has_refs = bool(ref_images or ref_videos)
         dur_cap = generation_duration_cap(settings, has_refs)
@@ -583,6 +716,9 @@ def _spawn(name: str, target: Callable[..., None], task_id: str, params: dict) -
 @app.route("/api/task/cancel/<task_id>", methods=["POST"])
 def api_task_cancel(task_id: str):
     """协作式取消：设置 cancel_event，当前段生成完成后停止。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
     with _tasks_lock:
         ev = _cancel_flags.get(task_id)
     if ev is None:
@@ -594,10 +730,14 @@ def api_task_cancel(task_id: str):
 
 @app.route("/api/task/theme", methods=["POST"])
 def api_task_theme():
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     task_id = body.get("task_id")
     if not task_id:
         return jsonify({"error": "需要 task_id，请先 POST /api/task/create"}), 400
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
+    body["_owner"] = username
     _write_task_meta(task_id, {"params": body})
     if not _spawn("theme", _run_theme_job, task_id, body):
         return (
@@ -610,11 +750,13 @@ def api_task_theme():
 @app.route("/api/task/theme/generate-idea", methods=["POST"])
 def api_task_theme_generate_idea():
     """调用 LLM 生成一个随机的故事主题创意，供用户一键填充。"""
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     style_hint = (body.get("style") or "").strip()
     try:
-        settings = load_settings(str(CONFIG_PATH))
-        cfg = _get_config_for_api()
+        cfg_path = _get_user_config_path_for_settings(username)
+        settings = load_settings(cfg_path)
+        cfg = _get_config_for_api(username)
         # 优先用专门配置的 theme_idea_model，否则回退到 theme_story_model / vision_model
         use_model = (
             cfg.get("theme_idea_model", "").strip()
@@ -646,16 +788,20 @@ def api_task_theme_generate_idea():
 @app.route("/api/task/theme/next", methods=["POST"])
 def api_task_theme_next():
     """逐条续写：根据已有分镜生成下一个镜头，立即返回（同步调用，约 5-15s）。"""
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     task_id = body.get("task_id")
     if not task_id:
         return jsonify({"error": "需要 task_id"}), 400
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
 
     td = _task_dir(task_id)
     sb_path = td / "storyboard.json"
 
     try:
-        settings = load_settings(str(CONFIG_PATH))
+        cfg_path = _get_user_config_path_for_settings(username)
+        settings = load_settings(cfg_path)
         theme = str(body.get("theme") or "")
         style = str(body.get("style") or "")
         model = body.get("model") or None
@@ -704,6 +850,7 @@ def api_task_theme_next():
 
 @app.route("/api/task/analyze", methods=["POST"])
 def api_task_analyze():
+    username = _require_user()
     params: dict[str, Any] = {}
     task_id: str | None = None
 
@@ -725,6 +872,8 @@ def api_task_analyze():
 
     if not task_id:
         return jsonify({"error": "需要 task_id"}), 400
+    if not _check_task_access(str(task_id), username):
+        return jsonify({"error": "无权限操作该任务"}), 403
 
     for k in ("segment_scenes", "skip_consolidate"):
         if k in params:
@@ -737,6 +886,7 @@ def api_task_analyze():
     else:
         params.pop("threshold", None)
 
+    params["_owner"] = username
     _write_task_meta(str(task_id), {"params": params})
     if not _spawn("analyze", _run_analyze_job, str(task_id), params):
         return (
@@ -748,10 +898,14 @@ def api_task_analyze():
 
 @app.route("/api/task/generate", methods=["POST"])
 def api_task_generate():
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     task_id = body.get("task_id")
     if not task_id:
         return jsonify({"error": "需要 task_id"}), 400
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
+    body["_owner"] = username
     _write_task_meta(task_id, {"params_generate": body})
     if not _spawn("generate", _run_generate_job, task_id, body):
         return (
@@ -764,10 +918,14 @@ def api_task_generate():
 @app.route("/api/task/run", methods=["POST"])
 def api_task_run():
     """一步：主题或分析 + 生成（顺序在同一线程中执行）。"""
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     task_id = body.get("task_id")
     if not task_id:
         return jsonify({"error": "需要 task_id"}), 400
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
+    body["_owner"] = username
 
     def pipeline(tid: str, p: dict) -> None:
         try:
@@ -791,7 +949,7 @@ def api_task_run():
                 "style": p.get("style") or "",
                 "resolution": p.get("resolution"),
                 "max_segment_seconds": p.get("max_segment_seconds"),
-                "max_workers": p.get("max_workers") or 2,
+                "max_workers": p.get("max_workers") or 4,
             }
             _run_generate_job(tid, gen_params)
         except Exception as e:
@@ -813,6 +971,9 @@ def api_task_run():
 
 @app.route("/api/task/<task_id>", methods=["GET"])
 def api_task_status(task_id: str):
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "unknown task"}), 404
     meta = _read_task_meta(task_id)
     if not meta:
         return jsonify({"error": "unknown task"}), 404
@@ -831,6 +992,18 @@ def api_task_status(task_id: str):
     out_url = None
     if (td / "output.mp4").is_file():
         out_url = f"/api/files/{task_id}/output.mp4"
+
+    # 输入视频（分析模式上传的视频）
+    input_video_url = None
+    if (td / "input_video.mp4").is_file():
+        input_video_url = f"/api/files/{task_id}/input_video.mp4"
+
+    # 参考文件列表：补充可访问的 URL
+    ref_files = list(meta.get("reference_files", []))
+    for rf in ref_files:
+        if rf.get("name"):
+            rf["url"] = f"/api/files/{task_id}/references/{rf['name']}"
+
     # 标记是否正在运行
     with _tasks_lock:
         is_running = task_id in _active_threads
@@ -840,6 +1013,8 @@ def api_task_status(task_id: str):
             "storyboard": storyboard,
             "segments": segments,
             "output_url": out_url,
+            "input_video_url": input_video_url,
+            "reference_files": ref_files,
             "is_running": is_running,
         }
     )
@@ -848,6 +1023,9 @@ def api_task_status(task_id: str):
 @app.route("/api/task/stream/<task_id>", methods=["GET"])
 def api_task_stream(task_id: str):
     """SSE 实时进度流。前端订阅此端点替代轮询。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "unknown task"}), 404
     q: queue.Queue = queue.Queue(maxsize=200)
     with _sse_lock:
         if task_id not in _sse_queues:
@@ -887,6 +1065,9 @@ def api_task_stream(task_id: str):
 
 @app.route("/api/files/<task_id>/<path:subpath>", methods=["GET"])
 def api_files(task_id: str, subpath: str):
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限访问该文件"}), 403
     td = _task_dir(task_id)
     parent = (td / subpath).resolve()
     if not str(parent).startswith(str(td.resolve())):
@@ -904,7 +1085,8 @@ def api_files(task_id: str, subpath: str):
 @app.route("/api/task/style/<task_id>", methods=["PUT"])
 def api_task_style_put(task_id: str):
     """保存/更新任务的统一风格（style），供分镜与视频生成共用。"""
-    if not _task_dir(task_id).is_dir():
+    username = _require_user()
+    if not _check_task_access(task_id, username):
         return jsonify({"error": "unknown task"}), 404
     body = request.get_json(force=True, silent=True) or {}
     style = str(body.get("style") or "").strip()
@@ -914,6 +1096,9 @@ def api_task_style_put(task_id: str):
 
 @app.route("/api/storyboard/<task_id>", methods=["PUT"])
 def api_storyboard_put(task_id: str):
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
     body = request.get_json(force=True, silent=True) or {}
     td = _task_dir(task_id)
     p = td / "storyboard.json"
@@ -946,14 +1131,16 @@ def _write_subjects(task_id: str, subjects: list[dict[str, Any]]) -> None:
 
 @app.route("/api/task/subjects/<task_id>", methods=["GET"])
 def api_subjects_get(task_id: str):
-    if not _task_dir(task_id).is_dir():
+    username = _require_user()
+    if not _check_task_access(task_id, username):
         return jsonify({"error": "unknown task"}), 404
     return jsonify({"subjects": _read_subjects(task_id)})
 
 
 @app.route("/api/task/subjects/<task_id>", methods=["PUT"])
 def api_subjects_put(task_id: str):
-    if not _task_dir(task_id).is_dir():
+    username = _require_user()
+    if not _check_task_access(task_id, username):
         return jsonify({"error": "unknown task"}), 404
     body = request.get_json(force=True, silent=True) or {}
     subjects = body.get("subjects", [])
@@ -968,13 +1155,15 @@ def api_subjects_put(task_id: str):
 @app.route("/api/translate", methods=["POST"])
 def api_translate():
     """单字段翻译：给定文本和目标语言，返回翻译结果。"""
+    username = _require_user()
     body = request.get_json(force=True, silent=True) or {}
     text = (body.get("text") or "").strip()
     target = (body.get("target") or "en").strip()  # "en" or "zh"
     if not text:
         return jsonify({"result": ""})
     try:
-        settings = load_settings(str(CONFIG_PATH))
+        cfg_path = _get_user_config_path_for_settings(username)
+        settings = load_settings(cfg_path)
         client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
         use_model = (settings.theme_story_model or settings.vision_model or "").strip()
         if target == "zh":
@@ -1071,9 +1260,13 @@ def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -
 
 @app.route("/api/workspace/list", methods=["GET"])
 def api_workspace_list():
-    _ensure_workspace()
+    username = _require_user()
+    user_ws = get_user_workspace_dir(username)
+    user_ws.mkdir(parents=True, exist_ok=True)
+
     rows = []
-    for d in sorted(WORKSPACE.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+    # 当前用户工作区
+    for d in sorted(user_ws.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
         if not d.is_dir():
             continue
         meta_path = d / "task.json"
@@ -1090,12 +1283,16 @@ def api_workspace_list():
 @app.route("/api/workspace/resume/<task_id>", methods=["POST"])
 def api_workspace_resume(task_id: str):
     """从已有分镜继续生成视频（可复用 segments 缓存）。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
     body = request.get_json(force=True, silent=True) or {}
     td = _task_dir(task_id)
     if not (td / "storyboard.json").is_file():
         return jsonify({"error": "无分镜可恢复"}), 400
     merged = {
         "task_id": task_id,
+        "_owner": username,
         "text_only_video": body.get("text_only_video"),
         "reference_images": body.get("reference_images") or [],
         "reference_videos": body.get("reference_videos") or [],
@@ -1104,7 +1301,7 @@ def api_workspace_resume(task_id: str):
         "style": body.get("style") or "",
         "resolution": body.get("resolution"),
         "max_segment_seconds": body.get("max_segment_seconds"),
-        "max_workers": body.get("max_workers") or 2,
+        "max_workers": body.get("max_workers") or 4,
     }
     _write_task_meta(task_id, {"status": "queued_generate", "params_resume": merged})
     if not _spawn("resume", _run_generate_job, task_id, merged):
@@ -1118,6 +1315,9 @@ def api_workspace_resume(task_id: str):
 @app.route("/api/workspace/clear-segments/<task_id>", methods=["POST"])
 def api_clear_segments(task_id: str):
     """删除片段缓存以便重新生成。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
     seg = _task_dir(task_id) / "segments"
     if seg.is_dir():
         shutil.rmtree(seg, ignore_errors=True)
@@ -1130,6 +1330,9 @@ def api_clear_segments(task_id: str):
 @app.route("/api/workspace/delete/<task_id>", methods=["DELETE"])
 def api_workspace_delete(task_id: str):
     """删除整个任务目录（不可恢复）。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
     td = _task_dir(task_id)
     if not td.is_dir():
         return jsonify({"error": "任务不存在"}), 404
@@ -1144,14 +1347,36 @@ def api_workspace_delete(task_id: str):
 # 启动
 # ---------------------------------------------------------------------------
 
-def _ensure_config_file() -> None:
-    if not CONFIG_PATH.is_file() and CONFIG_EXAMPLE.is_file():
-        CONFIG_PATH.write_text(CONFIG_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+def _migrate_legacy_tasks() -> None:
+    """将旧版无 owner 的任务迁移到 admin 用户工作区下。"""
+    if not WORKSPACE.is_dir():
+        return
+    admin_ws = get_user_workspace_dir("admin")
+    for d in list(WORKSPACE.iterdir()):
+        if not d.is_dir():
+            continue
+        meta_path = d / "task.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if meta.get("owner"):
+            continue
+        meta["owner"] = "admin"
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        dest = admin_ws / d.name
+        if not dest.exists():
+            admin_ws.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(d), str(dest))
 
 
 def main() -> None:
     _ensure_workspace()
-    _ensure_config_file()
+    _migrate_legacy_tasks()
     _cleanup_old_tasks()
     import socket
     local_ip = "127.0.0.1"

@@ -60,3 +60,13 @@ def get_static_dir() -> Path:
 def get_default_config_path() -> Path:
     """Web UI 读写的主配置文件路径。"""
     return get_project_root() / "config.json"
+
+
+def get_user_config_path(username: str) -> Path:
+    """每个用户独立的配置文件：data/config/users/<username>/config.json"""
+    return get_data_config_dir() / "users" / username / "config.json"
+
+
+def get_user_workspace_dir(username: str) -> Path:
+    """每个用户独立的工作区目录：data/workspace/<username>/"""
+    return get_workspace_dir() / username

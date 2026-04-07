@@ -21,7 +21,7 @@ DIRECTOR_SYSTEM = """You are a world-class film director and visual analysis exp
 Your task is not simply to describe what is on screen, but to deconstruct the cinematic language of the reference video and convert those filmmaking elements into a structured storyboard script.
 The script must be detailed enough to serve directly as prompt input for another video generation model (e.g. Sora, Runway Gen-3, Kling, Seedance, Wan, etc.).
 
-IMPORTANT: Ignore specific facial features and identifiable appearances (to allow character replacement later). Focus on **cinematography** (shot scale, angle, composition, camera movement + speed, lighting) and **staging** (subject position in frame, action, rhythm).
+IMPORTANT: Ignore specific facial features and identifiable appearances (to allow character replacement later). Focus on **cinematography** (shot scale, angle, composition, camera movement + speed, lighting), **staging** (subject position in frame, action, rhythm), and **character performance** (detailed micro-expressions, body language, and gestures that make characters feel human and alive). Do NOT describe character appearance/outfit — only describe their actions, expressions, and body language.
 
 Output **strict JSON only** (no Markdown code blocks, no preamble or postamble). Root object format (field names must match exactly for parsing):
 
@@ -35,13 +35,13 @@ Output **strict JSON only** (no Markdown code blocks, no preamble or postamble).
     {
       "shot_type": "Shot scale in English: extreme wide / wide / full / medium / close / extreme close / macro",
       "camera_movement": "Angle + camera movement with speed, in English. E.g.: eye-level, slow push-in; overhead, fast pan left",
-      "scene_description": "Composition (rule of thirds, center symmetry, leading lines, frame-within-frame) + environment and props, in English. No specific facial features.",
-      "character_action": "What the subject is doing, expression and body language, in English. Abstract — no appearance details.",
-      "dialogue": "Write any spoken line in English if lip-readable; otherwise empty string \"\"",
+      "scene_description": "Composition (rule of thirds, center symmetry, leading lines, frame-within-frame) + environment and props, in English.",
+      "character_action": "Detailed description of what the subject is doing, in English. No appearance/outfit details. MUST include: (1) specific micro-expressions (e.g. slight frown, eyes narrowing, lip quivering, nostril flaring, eyebrow raising, jaw clenching); (2) body language and gestures (e.g. hands trembling, shoulders tensing, leaning forward, fingers drumming); (3) movement dynamics (speed, hesitation, fluidity). Make characters feel human and alive.",
+      "dialogue": "Listen carefully to the audio track and transcribe any spoken dialogue accurately in English. Include speaker identification when possible (e.g. 'Man: \"Hello\"'). Preserve the original meaning and tone. If no dialogue is heard, use empty string \"\"",
       "mood": "Emotional atmosphere in English. E.g.: melancholic, tense, euphoric, eerie",
       "lighting": "Lighting in English. E.g.: Rembrandt lighting, soft backlight, neon rim light, hard sidelight",
       "audio_description": "Music / sound effects / ambient sound (excluding dialogue) in English. E.g.: distant train rumble, slow piano melody",
-      "generation_prompt": "PURE ENGLISH ONLY. Single paragraph. Formula: [shot scale + angle + camera move] + subject blocking + key action + light/mood + optional film style. NO non-English characters.",
+      "generation_prompt": "PURE ENGLISH ONLY. Single paragraph. Formula: [shot scale + angle + camera move] + subject blocking + key action with micro-expressions and body language + light/mood + optional film style. Include character expressions and gestures but NO appearance/outfit details. NO non-English characters.",
       "duration_sec": 5.0
     }
   ]
@@ -54,7 +54,11 @@ Rules:
 - ALL text fields must be written in English. No non-English characters in any field."""
 
 
-USER_ANALYSIS_PROMPT = """Analyze the uploaded reference video. Ignore specific character appearances (we may replace characters later). Focus on **cinematography** and **staging**.
+USER_ANALYSIS_PROMPT = """Analyze the uploaded reference video. Focus on **cinematography**, **staging**, and **character performance**.
+
+CRITICAL — Dialogue extraction: Listen carefully to the audio track of the video. Transcribe ALL spoken dialogue accurately in English, preserving the original meaning, tone, and speaker identification. The dialogue field must match the original video's audio content as closely as possible. This is essential for maintaining consistency with the original video.
+
+CRITICAL — Character performance: For each shot, describe detailed micro-expressions (e.g. eyebrow movements, lip tension, gaze direction, subtle facial muscle changes) and body language (e.g. hand gestures, posture shifts, breathing patterns, weight distribution). These details are essential for making generated characters feel human and alive.
 
 Fill in the JSON fields defined in the system prompt:
 
@@ -67,10 +71,11 @@ Fill in the JSON fields defined in the system prompt:
    - shot_type
    - composition + environment → scene_description
    - movement (with speed) + angle → camera_movement
-   - subject action + expression → character_action
+   - subject action + micro-expressions + body language → character_action
+   - spoken dialogue from audio → dialogue
    - lighting → lighting
    - duration in seconds → duration_sec
-   - AI video generation prompt (English) → generation_prompt
+   - AI video generation prompt (English, include character expressions) → generation_prompt
 
 Output JSON only. ALL fields must be in English."""
 
@@ -81,7 +86,7 @@ Consolidate into a coherent professional overview. Output **strict JSON only** (
 {
   "title": "Short film title or working title, in English",
   "synopsis": "2-4 sentences summarizing the narrative arc; then describe overall: core atmosphere, color palette, editing rhythm (echoing per-shot mood/lighting). All in English.",
-  "characters": "Main characters and their relationships in English (no specific appearances — focus on role and dynamic)",
+  "characters": "Main characters and their relationships in English (no specific appearances — focus on role, personality, and dynamic)",
   "shot_notes": [
     {
       "shot_id": 1,
@@ -556,9 +561,11 @@ def _full_video_user_text(style_hint: str) -> str:
     hint = f"\n{style_hint}" if style_hint else ""
     return (
         f"{USER_ANALYSIS_PROMPT}\n"
-        "请完整观看整支参考视频。除 global_summary 与 shots 外，每个镜头尽量给出在原片时间轴上的 "
+        "请完整观看整支参考视频，仔细听取音频轨道中的所有对话内容。"
+        "除 global_summary 与 shots 外，每个镜头尽量给出在原片时间轴上的 "
         "approx_start_sec 与 approx_end_sec（浮点秒，从 0 起算）。若无法精确，可用 duration_sec "
         "表示该镜时长并由系统推算。\n"
+        "对白必须准确反映原视频中角色的实际台词。角色动作描述必须包含微表情和肢体语言细节。\n"
         "只输出 JSON。"
         f"{hint}"
     )

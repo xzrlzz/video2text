@@ -1,5 +1,5 @@
 {
-  "dashscope_api_key": "在此填写你的百炼 API Key（sk- 开头）",
+  "dashscope_api_key": "",
   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "dashscope_api_base": "https://dashscope.aliyuncs.com/api/v1",
   "vision_model": "qwen3.6-plus",
@@ -7,13 +7,11 @@
   "theme_idea_model": "",
   "video_gen_model": "wan2.7-t2v",
   "video_ref_model": "wan2.7-r2v",
-  "default_resolution": "1280*720",
+  "default_resolution": "720*1280",
   "max_video_base64_mb": 9.0,
   "scene_detect_threshold": 27.0,
   "analysis_fps": 2.0,
-  "subject_descriptions": [
-    "示例：主角为年轻女性，短发，穿米色风衣（可按需删除或改写）"
-  ],
+  "subject_descriptions": [],
   "reference_urls": [],
   "reference_video_urls": [],
   "reference_video_descriptions": [],

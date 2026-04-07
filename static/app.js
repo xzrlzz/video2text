@@ -17,12 +17,31 @@
         meta: {},
         videoRefs: [],
         imageRefs: [],
-        subjects: [],          // [{name, name_zh, description_en, description_zh}]
+        subjects: [],
         storyboard: null,
         storyboardSig: null,
         lastOutputUrl: null,
         saveShotTimer: null,
         sseSource: null,
+        // 表单状态（每个任务独立保存）
+        form: {
+          themeText: '',
+          themeStyle: '',
+          themeModel: '',
+          minShots: '8',
+          maxShots: '24',
+          videoUrl: '',
+          analyzeStyle: '',
+          segmentScenes: false,
+          textOnly: false,
+          genStyle: '',
+          genResolution: '',
+          maxSeg: '15',
+          maxWorkers: '4',
+          videoFile: null,       // File object
+          videoPreviewReset: true,  // dropzone 是否需要重置
+          inputVideoUrl: '',     // 历史任务的输入视频 URL（从服务端恢复）
+        },
       };
     }
     return allTasks[id];
@@ -129,10 +148,18 @@
 
       // 运行中显示取消按钮
       if (isRunning(st) || t.meta.cancelling) {
-        const cancelBtn = createEl('span', { title: '取消', style: 'cursor:pointer;opacity:0.7;font-size:13px;' }, '✕');
+        const cancelBtn = createEl('span', { className: 'pill-cancel', title: '取消任务' }, '⏹');
         cancelBtn.onclick = (e) => { e.stopPropagation(); cancelTask(tid); };
         pill.appendChild(cancelBtn);
       }
+
+      // 关闭按钮（从标签栏移除，不删除服务端数据）
+      const closeBtn = createEl('span', { className: 'pill-close', title: '关闭标签' }, '✕');
+      closeBtn.onclick = (e) => {
+        e.stopPropagation();
+        closeTaskTab(tid);
+      };
+      pill.appendChild(closeBtn);
 
       pill.onclick = () => switchTask(tid);
       bar.insertBefore(pill, newBtn);
@@ -154,8 +181,170 @@
     return el;
   }
 
+  // ── 表单状态保存 / 恢复 ────────────────────────────────────────────────────
+  function saveFormState(taskId) {
+    if (!taskId || !allTasks[taskId]) return;
+    const f = allTasks[taskId].form;
+    f.themeText = ($('#theme-text') || {}).value || '';
+    f.themeStyle = ($('#theme-style') || {}).value || '';
+    f.themeModel = ($('#theme-model') || {}).value || '';
+    f.minShots = ($('#min-shots') || {}).value || '8';
+    f.maxShots = ($('#max-shots') || {}).value || '24';
+    f.videoUrl = ($('#video-url') || {}).value || '';
+    f.analyzeStyle = ($('#analyze-style') || {}).value || '';
+    f.segmentScenes = $('#segment-scenes') ? $('#segment-scenes').checked : false;
+    f.textOnly = $('#text-only') ? $('#text-only').checked : false;
+    f.genStyle = ($('#gen-style') || {}).value || '';
+    f.genResolution = ($('#gen-resolution') || {}).value || '';
+    f.maxSeg = ($('#max-seg') || {}).value || '15';
+    f.maxWorkers = ($('#max-workers') || {}).value || '4';
+    // 视频文件：保存 File 对象引用
+    const vf = $('#video-file');
+    if (vf && vf.files && vf.files[0]) {
+      f.videoFile = vf.files[0];
+      f.videoPreviewReset = false;
+    }
+  }
+
+  function restoreFormState(taskId) {
+    const f = (allTasks[taskId] || {}).form;
+    if (!f) return;
+    if ($('#theme-text')) $('#theme-text').value = f.themeText || '';
+    if ($('#theme-style')) $('#theme-style').value = f.themeStyle || '';
+    if ($('#theme-model')) $('#theme-model').value = f.themeModel || '';
+    if ($('#min-shots')) $('#min-shots').value = f.minShots || '8';
+    if ($('#max-shots')) $('#max-shots').value = f.maxShots || '24';
+    if ($('#video-url')) $('#video-url').value = f.videoUrl || '';
+    if ($('#analyze-style')) $('#analyze-style').value = f.analyzeStyle || '';
+    if ($('#segment-scenes')) $('#segment-scenes').checked = !!f.segmentScenes;
+    if ($('#text-only')) {
+      $('#text-only').checked = !!f.textOnly;
+      $('#ref-section').classList.toggle('hidden', !!f.textOnly);
+      const tw = $('#textonly-subject-wrap');
+      if (tw) tw.classList.toggle('hidden', !f.textOnly);
+    }
+    if ($('#gen-style')) $('#gen-style').value = f.genStyle || '';
+    if ($('#gen-resolution')) $('#gen-resolution').value = f.genResolution || '';
+    if ($('#max-seg')) $('#max-seg').value = f.maxSeg || '15';
+    if ($('#max-workers')) $('#max-workers').value = f.maxWorkers || '4';
+    // 视频文件 / dropzone
+    restoreVideoDropzone(f);
+  }
+
+  function restoreVideoDropzone(f) {
+    const videoDrop = $('#video-drop');
+    const videoFile = $('#video-file');
+    if (!videoDrop || !videoFile) return;
+    if (f.videoFile && !f.videoPreviewReset) {
+      showAnalyzeVideoPreview(f.videoFile);
+    } else if (f.inputVideoUrl) {
+      // 从服务端 URL 恢复视频预览（历史任务加载）
+      videoDrop.innerHTML = '';
+      videoDrop.style.padding = '0';
+      videoDrop.style.cursor = 'default';
+      videoDrop.style.borderStyle = 'solid';
+      const vid = document.createElement('video');
+      vid.src = f.inputVideoUrl;
+      vid.controls = true;
+      vid.style.cssText = 'width:100%;max-height:260px;display:block;border-radius:var(--radius);';
+      const changeBtn = document.createElement('button');
+      changeBtn.type = 'button';
+      changeBtn.className = 'ghost sm';
+      changeBtn.textContent = '重新选择';
+      changeBtn.style.cssText = 'margin:8px;font-size:12px;';
+      changeBtn.onclick = () => {
+        videoFile.value = '';
+        f.inputVideoUrl = '';
+        f.videoFile = null;
+        f.videoPreviewReset = true;
+        videoDrop.innerHTML = '拖拽视频到此处或点击选择（.mp4 等）';
+        videoDrop.style.padding = '';
+        videoDrop.style.cursor = '';
+        videoDrop.style.borderStyle = '';
+        bindVideoDrop();
+      };
+      videoDrop.appendChild(vid);
+      videoDrop.appendChild(changeBtn);
+    } else {
+      videoFile.value = '';
+      videoDrop.innerHTML = '拖拽视频到此处或点击选择（.mp4 等）';
+      videoDrop.style.padding = '';
+      videoDrop.style.cursor = '';
+      videoDrop.style.borderStyle = '';
+      bindVideoDrop();
+    }
+  }
+
+  function resetFormToDefaults() {
+    if ($('#theme-text')) $('#theme-text').value = '';
+    if ($('#theme-style')) $('#theme-style').value = '';
+    if ($('#theme-model')) $('#theme-model').value = '';
+    if ($('#min-shots')) $('#min-shots').value = '8';
+    if ($('#max-shots')) $('#max-shots').value = '24';
+    if ($('#video-url')) $('#video-url').value = '';
+    if ($('#analyze-style')) $('#analyze-style').value = '';
+    if ($('#segment-scenes')) $('#segment-scenes').checked = false;
+    if ($('#text-only')) {
+      $('#text-only').checked = false;
+      $('#ref-section').classList.remove('hidden');
+      const tw = $('#textonly-subject-wrap');
+      if (tw) tw.classList.add('hidden');
+    }
+    if ($('#gen-style')) $('#gen-style').value = '';
+    if ($('#gen-resolution')) $('#gen-resolution').value = '';
+    if ($('#max-seg')) $('#max-seg').value = '15';
+    if ($('#max-workers')) $('#max-workers').value = '4';
+    // 重置视频 dropzone
+    const videoDrop = $('#video-drop');
+    const videoFile = $('#video-file');
+    if (videoDrop) {
+      videoDrop.innerHTML = '拖拽视频到此处或点击选择（.mp4 等）';
+      videoDrop.style.padding = '';
+      videoDrop.style.cursor = '';
+      videoDrop.style.borderStyle = '';
+    }
+    if (videoFile) videoFile.value = '';
+    bindVideoDrop();
+  }
+
+  // ── 关闭任务标签（从 UI 移除，不删除服务端数据）──────────────────────────
+  function closeTaskTab(tid) {
+    const t = allTasks[tid];
+    if (t && isRunning(t.meta.status)) {
+      if (!confirm('该任务正在运行中，关闭标签不会停止后台任务。确认关闭？')) return;
+    }
+    if (t && t.sseSource) { t.sseSource.close(); t.sseSource = null; }
+    delete allTasks[tid];
+    if (currentTaskId === tid) {
+      const remaining = Object.keys(allTasks);
+      if (remaining.length > 0) {
+        currentTaskId = null; // 清掉防止 switchTask 里 saveFormState 保存到已删除的任务
+        switchTask(remaining[remaining.length - 1]);
+      } else {
+        currentTaskId = null;
+        resetFormToDefaults();
+        $('#task-id-display').textContent = '（点击「新建任务」）';
+        $('#task-hint').textContent = '';
+        $('#shots-container').innerHTML = '';
+        $('#shots-empty').classList.remove('hidden');
+        $('#output-wrap').classList.add('hidden');
+        $('#progress-log').innerHTML = '';
+        $('#gen-progress-wrap').classList.add('hidden');
+        $('#gen-progress-bar').style.width = '0%';
+        $('#subjects-list').innerHTML = '';
+        renderSegments([]);
+      }
+    }
+    renderStatusBar();
+  }
+
   // ── 切换当前任务 ──────────────────────────────────────────────────────────
   function switchTask(id) {
+    // 先保存当前任务的表单状态
+    if (currentTaskId && currentTaskId !== id) {
+      saveFormState(currentTaskId);
+    }
+
     currentTaskId = id;
     const t = getTask(id);
 
@@ -163,11 +352,16 @@
     $('#task-id-display').textContent = id;
     renderHint(t.meta);
 
-    // 回填已保存的风格到各输入框
-    const savedStyle = t.meta.style || '';
-    if ($('#gen-style')) $('#gen-style').value = savedStyle;
-    if ($('#theme-style')) $('#theme-style').value = savedStyle;
-    if ($('#analyze-style')) $('#analyze-style').value = savedStyle;
+    // 恢复该任务的表单状态
+    restoreFormState(id);
+
+    // 如果任务有已保存的统一风格，优先用它覆盖表单中的风格字段
+    if (t.meta.style !== undefined) {
+      const savedStyle = t.meta.style || '';
+      if ($('#gen-style')) $('#gen-style').value = savedStyle;
+      if ($('#theme-style')) $('#theme-style').value = savedStyle;
+      if ($('#analyze-style')) $('#analyze-style').value = savedStyle;
+    }
 
     // 主体卡片：先用缓存立即渲染，再后台拉新数据（避免空白等待）
     renderSubjects();
@@ -185,8 +379,8 @@
       $('#shots-empty').classList.remove('hidden');
     }
 
-    // 渲染进度
-    renderProgress(t.meta);
+    // 渲染进度（强制传入当前任务 ID，确保只渲染本任务日志）
+    renderProgress(t.meta, id);
 
     // 渲染输出
     if (t.lastOutputUrl) {
@@ -206,17 +400,26 @@
 
   // ── 新建任务 ────────────────────────────────────────────────────────────────
   async function createNewTask() {
+    // 先保存当前任务的表单状态
+    if (currentTaskId) saveFormState(currentTaskId);
     try {
       const { task_id } = await api('/api/task/create', { method: 'POST', json: true, body: {} });
       const t = getTask(task_id);
       t.meta = { task_id, status: 'created' };
+      currentTaskId = task_id;
       connectSSE(task_id);
-      switchTask(task_id);
-      // 清空 UI
+      // 重置所有表单到默认值
+      resetFormToDefaults();
+      // 清空任务相关 UI
+      $('#task-id-display').textContent = task_id;
+      renderHint(t.meta);
+      renderSubjects();
+      renderRefLists();
       $('#shots-container').innerHTML = '';
       $('#shots-empty').classList.remove('hidden');
       $('#output-wrap').classList.add('hidden');
-      $('#progress-log').innerHTML = '';
+      renderProgress(t.meta, task_id);
+      renderSegments([]);
       renderStatusBar();
       return task_id;
     } catch (e) {
@@ -241,7 +444,7 @@
       try { data = JSON.parse(ev.data); } catch { return; }
 
       if (data.type === 'snapshot') {
-        // 初始快照
+        // 初始快照：只更新本任务的数据
         t.meta = { ...t.meta, ...data };
         delete t.meta.type;
         if (data.storyboard && JSON.stringify(data.storyboard) !== t.storyboardSig) {
@@ -257,11 +460,16 @@
             $('#download-link').href = data.output_url;
           }
         }
+        // 快照到达后刷新该任务的日志和状态（仅当正在查看该任务时）
+        if (task_id === currentTaskId) {
+          renderProgress(t.meta, task_id);
+          renderHint(t.meta);
+        }
       } else if (data.type === 'progress') {
         const prog = t.meta.progress || [];
         prog.push({ t: data.t, msg: data.msg });
         t.meta.progress = prog.slice(-500);
-        if (task_id === currentTaskId) renderProgress(t.meta);
+        renderProgress(t.meta, task_id);
       } else if (data.type === 'status') {
         t.meta.status = data.status;
         if (data.error) t.meta.error = data.error;
@@ -355,7 +563,7 @@
         }
       }
       if (task_id === currentTaskId) {
-        renderProgress(t.meta);
+        renderProgress(t.meta, task_id);
         renderHint(t.meta);
         renderSegments(st.segments || []);
       }
@@ -403,16 +611,18 @@
   }
 
   // ── 进度渲染 ────────────────────────────────────────────────────────────────
-  function renderProgress(meta) {
+  function renderProgress(meta, taskId) {
+    // 安全校验：只渲染当前任务的日志，防止后台任务的回调污染当前视图
+    const tid = taskId || meta.task_id || currentTaskId;
+    if (tid && tid !== currentTaskId) return;
+
     const log = $('#progress-log');
     const lines = (meta.progress || []).map(p =>
       `<div>[${formatLogTime(p.t)}] ${escapeHtml(p.msg)}</div>`
     );
-    // 错误信息追加在日志末尾（正常顺序，不钉底部）
     if (meta.error && meta.status === 'failed') {
       lines.push(`<div class="log-error">✗ ${escapeHtml(meta.error)}</div>`);
     }
-    // 运行中显示等待指示（追在所有日志后，但不重复叠加）
     if (['theme_running', 'analyze_running'].includes(meta.status)) {
       lines.push(`<div class="log-waiting" id="log-waiting-dot">⏳ Waiting for LLM response<span class="dot-anim">…</span></div>`);
     }
@@ -430,6 +640,7 @@
       bar.style.width = '100%';
     } else {
       wrap.classList.add('hidden');
+      bar.style.width = '0%';
     }
   }
 
@@ -884,6 +1095,30 @@
   }
 
   // ── 参考媒体列表 ─────────────────────────────────────────────────────────────
+
+  let _saveRefsTimer = null;
+  function scheduleSaveRefs() {
+    clearTimeout(_saveRefsTimer);
+    _saveRefsTimer = setTimeout(saveRefsNow, 800);
+  }
+
+  async function saveRefsNow() {
+    if (!currentTaskId) return;
+    const t = getTask(currentTaskId);
+    const refs = [];
+    (t.videoRefs || []).forEach(v => {
+      refs.push({ path: v.path, name: v.name || '', kind: 'video', desc: v.desc || '' });
+    });
+    (t.imageRefs || []).forEach(im => {
+      refs.push({ path: im.path, name: im.name || '', kind: 'image', desc: im.subject || '' });
+    });
+    try {
+      await api('/api/task/references/' + currentTaskId, {
+        method: 'PUT', json: true, body: { reference_files: refs },
+      });
+    } catch (_) {}
+  }
+
   function renderRefLists() {
     const t = getTask(currentTaskId);
     const lv = $('#list-videos');
@@ -891,7 +1126,10 @@
     (t.videoRefs || []).forEach((v, i) => {
       const div = document.createElement('div');
       div.className = 'ref-item';
-      div.innerHTML = `<div class="thumb">视频${i+1}</div>
+      const thumbHtml = v.url
+        ? `<video class="ref-thumb-video" src="${escapeAttr(v.url)}" muted playsinline preload="metadata"></video>`
+        : `<div class="thumb">视频${i+1}</div>`;
+      div.innerHTML = `${thumbHtml}
         <div>
           <strong>视频 ${i + 1}</strong>
           <label>人物/内容说明（用于 prompt 主体声明，如 "男主角，黑色外套"）</label>
@@ -901,12 +1139,13 @@
       lv.appendChild(div);
     });
     lv.querySelectorAll('.video-desc-inp').forEach(inp => {
-      inp.oninput = () => { t.videoRefs[+inp.dataset.vi].desc = inp.value; };
+      inp.oninput = () => { t.videoRefs[+inp.dataset.vi].desc = inp.value; scheduleSaveRefs(); };
     });
     lv.querySelectorAll('[data-rm="v"]').forEach(btn => {
       btn.onclick = () => {
         t.videoRefs.splice(+btn.dataset.vi, 1);
         renderRefLists();
+        scheduleSaveRefs();
       };
     });
 
@@ -915,7 +1154,10 @@
     (t.imageRefs || []).forEach((im, j) => {
       const div = document.createElement('div');
       div.className = 'ref-item';
-      div.innerHTML = `<div class="thumb">图${j+1}</div>
+      const thumbHtml = im.url
+        ? `<img class="ref-thumb-img" src="${escapeAttr(im.url)}" />`
+        : `<div class="thumb">图${j+1}</div>`;
+      div.innerHTML = `${thumbHtml}
         <div>
           <strong>图 ${j + 1}</strong>
           <label>主体描述（图${j + 1} 对应哪个人物）</label>
@@ -925,12 +1167,13 @@
       li.appendChild(div);
     });
     li.querySelectorAll('.img-sub-inp').forEach(inp => {
-      inp.oninput = () => { t.imageRefs[+inp.dataset.ii].subject = inp.value; };
+      inp.oninput = () => { t.imageRefs[+inp.dataset.ii].subject = inp.value; scheduleSaveRefs(); };
     });
     li.querySelectorAll('[data-rm="i"]').forEach(btn => {
       btn.onclick = () => {
         t.imageRefs.splice(+btn.dataset.ii, 1);
         renderRefLists();
+        scheduleSaveRefs();
       };
     });
   }
@@ -949,8 +1192,8 @@
       if (!r.ok) { showToast(j.error || '上传失败'); return; }
       const t = getTask(currentTaskId);
       for (const file of j.files) {
-        if (file.kind === 'video') t.videoRefs.push({ path: file.path, desc: '' });
-        else t.imageRefs.push({ path: file.path, subject: '' });
+        if (file.kind === 'video') t.videoRefs.push({ path: file.path, name: file.name, desc: '' });
+        else t.imageRefs.push({ path: file.path, name: file.name, subject: '' });
       }
       renderRefLists();
       showToast(`已上传 ${j.files.length} 个文件`, 'success', 2500);
@@ -1032,7 +1275,7 @@
   function buildGeneratePayload() {
     const t = getTask(currentTaskId);
     const textOnly = $('#text-only').checked;
-    const maxWorkers = parseInt($('#max-workers').value) || 2;
+    const maxWorkers = parseInt($('#max-workers').value) || 4;
 
     const refVideos = (t.videoRefs || []).map(v => v.path);
     const refVideoDescs = refVideos.length
@@ -1526,6 +1769,7 @@
   }
 
   async function loadHistoryTask(task_id) {
+    if (currentTaskId) saveFormState(currentTaskId);
     const t = getTask(task_id);
     try {
       const [st] = await Promise.all([
@@ -1539,6 +1783,43 @@
         t.storyboardSig = JSON.stringify(st.storyboard);
       }
       if (st.output_url) t.lastOutputUrl = st.output_url;
+
+      // 恢复参考文件列表
+      t.videoRefs = [];
+      t.imageRefs = [];
+      if (st.reference_files && st.reference_files.length) {
+        st.reference_files.forEach(rf => {
+          if (rf.kind === 'video') {
+            t.videoRefs.push({ path: rf.path, name: rf.name || '', url: rf.url || '', desc: rf.desc || '' });
+          } else {
+            t.imageRefs.push({ path: rf.path, name: rf.name || '', url: rf.url || '', subject: rf.desc || '' });
+          }
+        });
+      }
+
+      // 恢复表单参数（从 task params 中还原）
+      const params = st.params || {};
+      const f = t.form;
+      f.themeText = params.theme || '';
+      f.themeStyle = params.style || st.style || '';
+      f.themeModel = params.model || '';
+      f.minShots = String(params.min_shots || 8);
+      f.maxShots = String(params.max_shots || 24);
+      f.videoUrl = params.video_url || '';
+      f.analyzeStyle = params.style || st.style || '';
+      f.segmentScenes = !!params.segment_scenes;
+      f.genStyle = st.style || '';
+      // 分析模式下的输入视频预览
+      if (st.input_video_url) {
+        f.inputVideoUrl = st.input_video_url;
+      }
+      // text_only 和 generation 参数
+      const genParams = st.params_generate || st.params_run || {};
+      f.textOnly = !!genParams.text_only_video;
+      f.genResolution = genParams.resolution || '';
+      f.maxSeg = String(genParams.max_segment_seconds || 15);
+      f.maxWorkers = String(genParams.max_workers || 4);
+
       connectSSE(task_id);
       switchTask(task_id);
       renderStatusBar();
