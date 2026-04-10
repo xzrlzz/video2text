@@ -395,15 +395,17 @@ def match_characters_for_chunk(
 def _chunk_text_blob(chunk: list[Shot]) -> str:
     parts: list[str] = []
     for s in chunk:
-        for field in (
+        for f in (
             s.generation_prompt,
             s.scene_description,
             s.character_action,
             s.dialogue,
             s.mood,
+            getattr(s, "continuity_anchor", ""),
+            getattr(s, "focal_character", ""),
         ):
-            if field and str(field).strip():
-                parts.append(str(field).strip())
+            if f and str(f).strip():
+                parts.append(str(f).strip())
     return "\n".join(parts)
 
 
@@ -665,6 +667,7 @@ def build_wan_multi_shot_prompt(
 
     t0 = 0
     segs: list[str] = []
+    neg_hints: list[str] = []
     for shot, sec in zip(chunk, lens):
         t1 = t0 + sec
         gp = shot.generation_prompt.strip()
@@ -679,11 +682,23 @@ def build_wan_multi_shot_prompt(
         seg_text = f"Shot {len(segs)+1} [{t0}-{t1}s]: {visual}"
         if shot.dialogue and shot.dialogue.strip():
             seg_text += f" | dialogue: {shot.dialogue.strip()}"
+        ambient = getattr(shot, "ambient_sound", "") or ""
+        if ambient.strip():
+            seg_text += f" | ambient: {ambient.strip()}"
         segs.append(seg_text)
         t0 = t1
 
+        neg = getattr(shot, "negative_prompt_hint", "") or ""
+        if neg.strip():
+            neg_hints.append(neg.strip())
+
     shots_text = ". ".join(segs)
     prompt = f"{prefix} {shots_text}".strip() if prefix else shots_text
+
+    if neg_hints:
+        combined_neg = ", ".join(dict.fromkeys(neg_hints))
+        prompt += f" Avoid unwanted elements: {combined_neg}."
+
     return prompt, target
 
 

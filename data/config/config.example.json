@@ -1,5 +1,5 @@
 {
-  "dashscope_api_key": "",
+  "dashscope_api_key": "在此填写你的百炼 API Key（sk- 开头）",
   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "dashscope_api_base": "https://dashscope.aliyuncs.com/api/v1",
   "vision_model": "qwen3.6-plus",

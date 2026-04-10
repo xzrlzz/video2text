@@ -958,15 +958,28 @@
       const mentionedSubjects = (getTask(currentTaskId).subjects || [])
         .filter(s => s.name && mentioned.includes(s.name) && s.description_en);
 
+      // metadata badges
+      const metaParts = [];
+      if (shot.cut_rhythm) metaParts.push(`<span class="shot-cut-rhythm">${escapeHtml(shot.cut_rhythm)}</span>`);
+      if (shot.camera_angle) metaParts.push(`<span class="meta-label">${escapeHtml(shot.camera_angle)}</span>`);
+      if (shot.focal_character) metaParts.push(`<span class="shot-focal">${escapeHtml(shot.focal_character)}</span>`);
+      const metaHtml = metaParts.length ? `<div class="shot-meta-row">${metaParts.join(' ')}</div>` : '';
+
+      const anchorHtml = shot.continuity_anchor ? `<div class="shot-continuity-anchor"><span class="meta-label">anchor:</span> ${escapeHtml(shot.continuity_anchor)}</div>` : '';
+      const contNoteHtml = shot.continuity_note ? `<div class="shot-continuity-note"><span class="meta-label">cut:</span> ${escapeHtml(shot.continuity_note)}</div>` : '';
+      const negHtml = shot.negative_prompt_hint ? `<div class="shot-neg-hint">${escapeHtml(shot.negative_prompt_hint)}</div>` : '';
+
       card.innerHTML = `
         <header>
-          <span>Shot ${shot.shot_id} · ${shot.duration}s · ${escapeHtml(shot.shot_type || '')}</span>
+          <span>Shot ${shot.shot_id} · <input type="number" class="shot-duration-input" data-idx="${idx}" value="${shot.duration}" min="0.5" max="30" step="0.5" title="镜头时长（秒），可直接修改" />s · ${escapeHtml(shot.shot_type || '')}</span>
           <div style="display:flex;align-items:center;gap:8px;">
             <div class="shot-mentions">${chipsHtml}</div>
             <button class="btn-shot-translate ghost sm" data-sidx="${idx}" title="翻译本镜场景/对白/prompt 为中文" style="font-size:11px;padding:2px 7px;opacity:0.7;">🌐 译</button>
           </div>
         </header>
+        ${metaHtml}
         <div class="scene-desc">${sceneHtml}</div>
+        ${anchorHtml}${contNoteHtml}${negHtml}
         <div class="shot-zh-block hidden" data-zh-block="${idx}">
           <div class="shot-zh-row">
             <span class="shot-zh-label">场景（中）</span>
@@ -1034,6 +1047,30 @@
       };
     });
 
+    c.querySelectorAll('.shot-duration-input').forEach(inp => {
+      inp.oninput = () => {
+        const idx = +inp.dataset.idx;
+        const t2 = getTask(currentTaskId);
+        const v = parseFloat(inp.value);
+        if (t2.storyboard && t2.storyboard.shots[idx] && !isNaN(v) && v > 0) {
+          t2.storyboard.shots[idx].duration = Math.round(v * 100) / 100;
+        }
+      };
+      inp.onblur = () => {
+        const idx = +inp.dataset.idx;
+        const t2 = getTask(currentTaskId);
+        let v = parseFloat(inp.value);
+        if (isNaN(v) || v < 0.5) v = 0.5;
+        if (v > 30) v = 30;
+        v = Math.round(v * 100) / 100;
+        inp.value = v;
+        if (t2.storyboard && t2.storyboard.shots[idx]) {
+          t2.storyboard.shots[idx].duration = v;
+        }
+        scheduleSaveStoryboard();
+      };
+    });
+
     // 注入角色描述按钮
     c.querySelectorAll('.btn-inject-subject').forEach(btn => {
       btn.onclick = () => {
@@ -1085,6 +1122,13 @@
       const idx = +ta.dataset.idx;
       const field = ta.dataset.field;
       if (t.storyboard.shots[idx]) t.storyboard.shots[idx][field] = ta.value;
+    });
+    $('#shots-container').querySelectorAll('.shot-duration-input').forEach(inp => {
+      const idx = +inp.dataset.idx;
+      const v = parseFloat(inp.value);
+      if (t.storyboard.shots[idx] && !isNaN(v) && v > 0) {
+        t.storyboard.shots[idx].duration = Math.round(v * 100) / 100;
+      }
     });
     try {
       await api('/api/storyboard/' + currentTaskId, { method: 'PUT', json: true, body: t.storyboard });
@@ -1990,6 +2034,54 @@
       } catch (e) {
         showToast('创建失败：' + e.message, 'error', 5000);
       }
+    };
+  }
+
+  // ── 缓存清理（管理员面板） ───────────────────────────────────────────────────
+  if ($('#btn-disk-usage')) {
+    $('#btn-disk-usage').onclick = async () => {
+      const el = $('#disk-usage-info');
+      el.textContent = '加载中...';
+      try {
+        const data = await apiFetch('/api/admin/disk-usage');
+        if (!data.length) { el.textContent = '暂无数据'; return; }
+        el.innerHTML = data.map(u =>
+          `<div>${escapeHtml(u.user)}: ${u.tasks} 个任务, ${u.mb} MB</div>`
+        ).join('');
+      } catch (e) { el.textContent = '加载失败: ' + e.message; }
+    };
+  }
+  if ($('#btn-cleanup-preview')) {
+    $('#btn-cleanup-preview').onclick = async () => {
+      const el = $('#cleanup-result');
+      el.textContent = '预览中...';
+      try {
+        const data = await apiFetch('/api/admin/cleanup', {
+          method: 'POST', json: true, body: { dry_run: true },
+        });
+        if (!data.deleted.length) {
+          el.textContent = '没有可清理的过期任务。';
+        } else {
+          el.textContent = `可删除 ${data.deleted.length} 个任务，释放 ${data.freed_mb} MB\n` +
+            data.deleted.join('\n');
+        }
+      } catch (e) { el.textContent = '预览失败: ' + e.message; }
+    };
+  }
+  if ($('#btn-cleanup-run')) {
+    $('#btn-cleanup-run').onclick = async () => {
+      if (!confirm('确定要清理所有过期任务？此操作不可恢复。')) return;
+      const el = $('#cleanup-result');
+      el.textContent = '清理中...';
+      try {
+        const data = await apiFetch('/api/admin/cleanup', {
+          method: 'POST', json: true, body: { dry_run: false },
+        });
+        el.textContent = `已删除 ${data.deleted.length} 个任务，释放 ${data.freed_mb} MB`;
+        if (data.skipped_running.length) {
+          el.textContent += `\n跳过运行中: ${data.skipped_running.join(', ')}`;
+        }
+      } catch (e) { el.textContent = '清理失败: ' + e.message; }
     };
   }
 

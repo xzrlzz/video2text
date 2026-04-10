@@ -22,6 +22,8 @@ data/config/*
 # 旧位置（兼容）
 workspace/
 
+v2t.log
+
 *.egg-info/
 src/*.egg-info/
 dist/

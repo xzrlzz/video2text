@@ -259,7 +259,8 @@ def cmd_theme(
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
     click.echo(
-        f"主题创作中（模型：{model or settings.theme_story_model or settings.vision_model}，镜头 {min_shots}～{max_shots}）…"
+        f"主题创作中（模型：{model or settings.theme_story_model or settings.vision_model}，镜头 {min_shots}～{max_shots}）\n"
+        f"  Phase 1：生成故事大纲…  Phase 2：设计分镜…"
     )
     doc = generate_storyboard_from_theme(
         combined,
@@ -657,7 +658,8 @@ def cmd_run(
         settings = load_settings(_resolve_config_path(ctx))
         click.echo(
             f"主题 → 分镜（模型 {theme_model or settings.theme_story_model or settings.vision_model}，"
-            f"镜头 {min_shots}～{max_shots}）…"
+            f"镜头 {min_shots}～{max_shots}）\n"
+            f"  Phase 1：生成故事大纲…  Phase 2：设计分镜…"
         )
         doc = generate_storyboard_from_theme(
             theme_combined,

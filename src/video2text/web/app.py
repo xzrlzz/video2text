@@ -55,7 +55,10 @@ CONFIG_PATH = get_default_config_path()
 CONFIG_EXAMPLE = get_config_example_path()
 
 # 任务自动清理：超过 N 天未更新的任务目录将在下次启动时清理
-TASK_TTL_DAYS = 7
+TASK_TTL_DAYS = 2
+_CLEANUP_INTERVAL_SEC = 6 * 3600  # 6 hours
+
+_RUNNING_STATUSES = frozenset({"running", "pending", "analyzing", "generating", "consolidating"})
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB uploads
@@ -243,31 +246,73 @@ def _save_config_file(data: dict[str, Any]) -> None:
     )
 
 
-def _cleanup_old_tasks() -> None:
-    """清理超过 TASK_TTL_DAYS 天未更新的任务目录（遍历所有用户子目录）。"""
+def _task_last_modified(task_dir: Path) -> datetime | None:
+    """Get the last modification time of a task (from task.json metadata or filesystem mtime)."""
+    meta_path = task_dir / "task.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            updated_str = meta.get("updated", "")
+            if updated_str:
+                dt = datetime.fromisoformat(updated_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+        except Exception:
+            pass
+    try:
+        mtime = task_dir.stat().st_mtime
+        return datetime.fromtimestamp(mtime, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def _is_task_running(task_id: str) -> bool:
+    """Check if a task is currently running (active thread or running status)."""
+    with _tasks_lock:
+        if task_id in _active_threads:
+            return True
+    for user_dir in WORKSPACE.iterdir():
+        if not user_dir.is_dir():
+            continue
+        td = user_dir / task_id
+        meta_path = td / "task.json"
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta.get("status", "") in _RUNNING_STATUSES:
+                    return True
+            except Exception:
+                pass
+            break
+    return False
+
+
+def _cleanup_old_tasks(dry_run: bool = False) -> dict[str, Any]:
+    """清理超过 TASK_TTL_DAYS 天未更新的任务目录（保护运行中的任务）。"""
     cutoff = datetime.now(timezone.utc) - timedelta(days=TASK_TTL_DAYS)
+    result: dict[str, Any] = {"deleted": [], "skipped_running": [], "freed_bytes": 0}
     if not WORKSPACE.is_dir():
-        return
+        return result
     for user_dir in WORKSPACE.iterdir():
         if not user_dir.is_dir():
             continue
         for d in user_dir.iterdir():
             if not d.is_dir():
                 continue
-            meta_path = d / "task.json"
-            if not meta_path.is_file():
+            task_id = d.name
+            last_mod = _task_last_modified(d)
+            if last_mod is None or last_mod >= cutoff:
                 continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                updated_str = meta.get("updated", "")
-                if updated_str:
-                    updated = datetime.fromisoformat(updated_str)
-                    if updated.tzinfo is None:
-                        updated = updated.replace(tzinfo=timezone.utc)
-                    if updated < cutoff:
-                        shutil.rmtree(d, ignore_errors=True)
-            except Exception:
-                pass
+            if _is_task_running(task_id):
+                result["skipped_running"].append(task_id)
+                continue
+            dir_size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            result["freed_bytes"] += dir_size
+            if not dry_run:
+                shutil.rmtree(d, ignore_errors=True)
+            result["deleted"].append(task_id)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +479,7 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
         use_model = params.get("model") or settings.theme_story_model or settings.vision_model
         min_shots = int(params.get("min_shots") or 8)
         max_shots = int(params.get("max_shots") or 24)
-        log(f"Calling LLM ({use_model}) to generate {min_shots}–{max_shots} shots… (this may take 15–60s)")
+        log(f"Calling LLM ({use_model}) — Phase 1: story outline, Phase 2: shot design ({min_shots}–{max_shots} shots)… (this may take 30–90s)")
         doc = generate_storyboard_from_theme(
             theme,
             settings,
@@ -1343,6 +1388,46 @@ def api_workspace_delete(task_id: str):
     return jsonify({"ok": True})
 
 
+def _workspace_disk_usage() -> list[dict[str, Any]]:
+    """统计各用户工作区磁盘占用。"""
+    usage: list[dict[str, Any]] = []
+    if not WORKSPACE.is_dir():
+        return usage
+    for user_dir in sorted(WORKSPACE.iterdir(), key=lambda x: x.name):
+        if not user_dir.is_dir():
+            continue
+        total = 0
+        task_count = 0
+        for d in user_dir.iterdir():
+            if d.is_dir() and (d / "task.json").is_file():
+                task_count += 1
+                total += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        usage.append({
+            "user": user_dir.name,
+            "tasks": task_count,
+            "bytes": total,
+            "mb": round(total / (1024 * 1024), 1),
+        })
+    return usage
+
+
+@app.route("/api/admin/disk-usage")
+def api_admin_disk_usage():
+    """查看各用户工作区磁盘占用。"""
+    _require_user()
+    return jsonify(_workspace_disk_usage())
+
+
+@app.route("/api/admin/cleanup", methods=["POST"])
+def api_admin_cleanup():
+    """手动触发缓存清理（支持 dry_run 预览）。"""
+    _require_user()
+    dry_run = request.json.get("dry_run", False) if request.is_json else False
+    result = _cleanup_old_tasks(dry_run=dry_run)
+    result["freed_mb"] = round(result["freed_bytes"] / (1024 * 1024), 1)
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # 启动
 # ---------------------------------------------------------------------------
@@ -1374,10 +1459,33 @@ def _migrate_legacy_tasks() -> None:
             shutil.move(str(d), str(dest))
 
 
+def _start_cleanup_timer() -> None:
+    """Start a daemon thread that runs cleanup periodically."""
+    import time
+
+    def _loop() -> None:
+        while True:
+            time.sleep(_CLEANUP_INTERVAL_SEC)
+            try:
+                result = _cleanup_old_tasks()
+                if result["deleted"]:
+                    freed_mb = round(result["freed_bytes"] / (1024 * 1024), 1)
+                    print(f"[cleanup] 定时清理：删除 {len(result['deleted'])} 个过期任务，释放 {freed_mb} MB")
+            except Exception as e:
+                print(f"[cleanup] 定时清理异常: {e}")
+
+    t = threading.Thread(target=_loop, daemon=True, name="cleanup-timer")
+    t.start()
+
+
 def main() -> None:
     _ensure_workspace()
     _migrate_legacy_tasks()
-    _cleanup_old_tasks()
+    result = _cleanup_old_tasks()
+    if result["deleted"]:
+        freed_mb = round(result["freed_bytes"] / (1024 * 1024), 1)
+        print(f"[startup] 清理 {len(result['deleted'])} 个过期任务（>{TASK_TTL_DAYS} 天），释放 {freed_mb} MB")
+    _start_cleanup_timer()
     import socket
     local_ip = "127.0.0.1"
     try:
