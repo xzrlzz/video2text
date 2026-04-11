@@ -410,6 +410,10 @@
       connectSSE(task_id);
       // 重置所有表单到默认值
       resetFormToDefaults();
+      // 清空输入
+      if ($('#theme-text')) $('#theme-text').value = '';
+      if ($('#video-url')) $('#video-url').value = '';
+      if ($('#video-file')) $('#video-file').value = '';
       // 清空任务相关 UI
       $('#task-id-display').textContent = task_id;
       renderHint(t.meta);
@@ -1083,15 +1087,16 @@
         const relevant = (t.subjects || []).filter(s => s.name && names.includes(s.name) &&
           (shotText.includes(s.name) || shotText.includes('@' + s.name)) && s.description_en);
         if (!relevant.length) { showToast('未找到本镜头相关角色描述', 'warning', 2000); return; }
-        // 构建前缀：[Character descriptions] Name: desc; Name2: desc2.
+        // 构建前缀：[Character descriptions] Name: desc; Name2: desc2. [/descriptions]
         const prefix = '[Character descriptions] ' +
-          relevant.map(s => `${s.name}: ${s.description_en.trim()}`).join('; ') + '.';
+          relevant.map(s => `${s.name}: ${s.description_en.trim()}`).join('; ') + ' [/descriptions]';
         const ta = btn.closest('.shot-card').querySelector('textarea[data-field="generation_prompt"]');
         const existing = ta.value.trim();
         // 若已有同样的前缀则不重复注入
         if (existing.startsWith('[Character descriptions]')) {
-          // 替换旧前缀
-          const rest = existing.replace(/^\[Character descriptions\][^.]*\.\s*/, '');
+          // 替换旧前缀（兼容新旧格式）
+          const rest = existing.replace(/^\[Character descriptions\][\s\S]*?\[\/descriptions\]\s*/, '')
+            || existing.replace(/^\[Character descriptions\][^.]*\.\s*/, '');
           ta.value = `${prefix} ${rest}`.trim();
         } else {
           ta.value = existing ? `${prefix} ${existing}` : prefix;

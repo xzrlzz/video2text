@@ -514,8 +514,12 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
                 _write_subjects(task_id, subjects)
                 _sse_push(task_id, {"type": "subjects_ready", "count": len(subjects), "subjects": subjects})
                 log(f"Subject descriptions generated: {len(subjects)} characters.")
+            else:
+                log("Subject generation returned empty — no named characters found or LLM response unparseable.")
         except Exception as se:
             log(f"Subject generation skipped: {se}")
+        _write_task_meta(task_id, {"status": "done"})
+        _sse_push(task_id, {"type": "status", "status": "done"})
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
@@ -610,8 +614,12 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
                 _write_subjects(task_id, subjects)
                 _sse_push(task_id, {"type": "subjects_ready", "count": len(subjects), "subjects": subjects})
                 log(f"Subject descriptions generated: {len(subjects)} characters.")
+            else:
+                log("Subject generation returned empty — no named characters found or LLM response unparseable.")
         except Exception as se:
             log(f"Subject generation skipped: {se}")
+        _write_task_meta(task_id, {"status": "done"})
+        _sse_push(task_id, {"type": "status", "status": "done"})
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
@@ -732,22 +740,41 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
 
 
 def _spawn(name: str, target: Callable[..., None], task_id: str, params: dict) -> bool:
-    """启动后台线程。若该 task_id 已有作业在执行则返回 False（不重复排队）。"""
+    """启动后台线程（跨进程原子去重）。
+    使用 .running 标志文件 + fcntl 文件锁确保多 worker 进程间只有一个实例运行。
+    """
+    import fcntl
+    import os
+
+    td = _task_dir(task_id)
+    td.mkdir(parents=True, exist_ok=True)
+    flag = td / ".running"
+    lock_path = td / ".spawn.lock"
+
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            if flag.exists():
+                return False
+            with _tasks_lock:
+                if task_id in _active_threads:
+                    return False
+            flag.write_text(str(os.getpid()), encoding="utf-8")
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
     def wrap() -> None:
         try:
             target(task_id, params)
         finally:
+            flag.unlink(missing_ok=True)
             with _tasks_lock:
                 _active_threads.pop(task_id, None)
                 _cancel_flags.pop(task_id, None)
 
-    # 为每个任务创建取消标志
     cancel_ev = threading.Event()
     t = threading.Thread(target=wrap, daemon=True, name=name)
     with _tasks_lock:
-        if task_id in _active_threads:
-            return False
         _active_threads[task_id] = t
         _cancel_flags[task_id] = cancel_ev
     t.start()
@@ -810,13 +837,16 @@ def api_task_theme_generate_idea():
             or ""
         ).strip()
         client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
-        style_clause = f"，风格偏好：{style_hint}" if style_hint else ""
+        style_clause = f" Style preference: {style_hint}" if style_hint else ""
         sys_prompt = (
-            "你是一位极具创意的故事策划师，擅长构思简洁而引人入胜的短视频故事主题。"
-            "每次仅输出一个故事主题/创意，用一到三句话描述，不要序号、不要额外说明。"
-            "内容要有情感张力、画面感强、适合视频表现。"
+            "You are a creative story producer for short-form video. "
+            "Each time output exactly one story theme or pitch in one to three sentences. "
+            "No numbering, no preamble or explanation. "
+            "Make it emotionally engaging, visually vivid, and suitable for video."
         )
-        user_prompt = f"请随机生成一个全新的、独特的短视频故事主题创意{style_clause}。"
+        user_prompt = (
+            f"Generate one fresh, distinctive short-video story idea.{style_clause}"
+        )
         completion = client.chat.completions.create(
             model=use_model,
             messages=[
@@ -1067,36 +1097,66 @@ def api_task_status(task_id: str):
 
 @app.route("/api/task/stream/<task_id>", methods=["GET"])
 def api_task_stream(task_id: str):
-    """SSE 实时进度流。前端订阅此端点替代轮询。"""
+    """SSE 实时进度流——基于文件轮询，完全跨 worker 进程。"""
     username = _require_user()
     if not _check_task_access(task_id, username):
         return jsonify({"error": "unknown task"}), 404
-    q: queue.Queue = queue.Queue(maxsize=200)
-    with _sse_lock:
-        if task_id not in _sse_queues:
-            _sse_queues[task_id] = []
-        _sse_queues[task_id].append(q)
+    _terminal = {"done", "failed", "cancelled"}
 
     def generate():
-        try:
-            # 推送当前快照
+        sent_count = 0
+        last_status: str | None = None
+        subjects_sent = False
+        tick = 0
+
+        meta = _read_task_meta(task_id)
+        if meta:
+            yield f"data: {json.dumps({'type': 'snapshot', **meta}, ensure_ascii=False)}\n\n"
+            sent_count = len(meta.get("progress", []))
+            last_status = meta.get("status")
+            subjects = _read_subjects(task_id)
+            if subjects:
+                yield f"data: {json.dumps({'type': 'subjects_ready', 'count': len(subjects), 'subjects': subjects}, ensure_ascii=False)}\n\n"
+                subjects_sent = True
+
+        if last_status in _terminal:
+            return
+
+        while True:
+            time.sleep(1)
+            tick += 1
             meta = _read_task_meta(task_id)
-            if meta:
-                yield f"data: {json.dumps({'type': 'snapshot', **meta}, ensure_ascii=False)}\n\n"
-            while True:
-                try:
-                    event = q.get(timeout=30)
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    if event.get("type") == "status" and event.get("status") in ("done", "failed", "cancelled"):
-                        break
-                except queue.Empty:
-                    # 心跳
-                    yield ": ping\n\n"
-        finally:
-            with _sse_lock:
-                qs = _sse_queues.get(task_id, [])
-                if q in qs:
-                    qs.remove(q)
+            if not meta:
+                if tick % 15 == 0:
+                    yield ": keepalive\n\n"
+                continue
+
+            progress = meta.get("progress", [])
+            for entry in progress[sent_count:]:
+                yield f"data: {json.dumps({'type': 'progress', 'msg': entry.get('msg',''), 't': entry.get('t','')}, ensure_ascii=False)}\n\n"
+            sent_count = len(progress)
+
+            status = meta.get("status", "")
+            if status and status != last_status:
+                ev: dict[str, Any] = {"type": "status", "status": status}
+                if status == "failed":
+                    ev["error"] = meta.get("error", "")
+                if status == "storyboard_ready":
+                    ev["shot_count"] = meta.get("shot_count", 0)
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                last_status = status
+
+            if not subjects_sent:
+                subjects = _read_subjects(task_id)
+                if subjects:
+                    yield f"data: {json.dumps({'type': 'subjects_ready', 'count': len(subjects), 'subjects': subjects}, ensure_ascii=False)}\n\n"
+                    subjects_sent = True
+
+            if status in _terminal:
+                break
+
+            if tick % 15 == 0:
+                yield ": keepalive\n\n"
 
     return Response(
         generate(),
@@ -1234,23 +1294,30 @@ def api_translate():
 # 主体自动生成（分镜完成后调用）
 # ---------------------------------------------------------------------------
 
-_SUBJECT_GEN_SYSTEM = """You are a character description expert for AI video generation.
-Given a storyboard's character list and shot list, extract each named character and write a detailed visual description for each.
+_SUBJECT_GEN_SYSTEM = """You are a character visual-tag extractor for AI video generation.
+Given a storyboard, extract each named character and output a detailed **sentence-based visual appearance description** for each.
 
 Output strict JSON array only (no Markdown):
 [
   {
-    "name": "Character name as used in dialogue/shots",
-    "name_zh": "Character name in Chinese (transliterate or translate)",
-    "description_en": "Detailed English visual description for video generation prompt injection. Include: gender, approximate age, distinctive physical traits (hair color/length/style, eye color, skin tone), typical outfit/wardrobe in this story, personality/expression tendency. Be specific and consistent. 2-4 sentences.",
-    "description_zh": "同上，中文版本。2-4句。"
+    "name": "Character name as used in shots",
+    "name_zh": "Same name in Simplified Chinese characters (natural translation if the story is English)",
+    "region_en": "Short label for regional/casting appearance: e.g. Eastern Asian, Western, South Asian, Middle Eastern, African, Latino, mixed, or ambiguous — NOT nationality/citizenship, only observable look for video casting",
+    "region_zh": "Same regional label as region_en, written in Simplified Chinese characters",
+    "description_en": "A series of English sentences describing visual attributes in this order: gender, approximate age range, build/body type, regional appearance (must match region_en, one sentence e.g. 'The regional appearance is Eastern Asian.' or 'The regional appearance is Western.'), hair color, hair type (straight/wavy/curly), hair length (short/medium/long), eye color, skin tone, upper clothing, lower clothing, footwear. Example: 'The gender is female. The age is around 20s. The build is slim. The regional appearance is Eastern Asian. The hair is black. The hair type is straight. The hair length is long. The eye color is brown. The skin tone is fair. The upper clothing is a white blouse. The lower clothing is blue jeans. The footwear is white sneakers.'",
+    "description_zh": "Simplified Chinese mirror of description_en: same sentence-based pattern, one visual attribute per sentence"
   }
 ]
 
 Rules:
 - Only include named characters that appear in dialogue or character_action fields.
-- description_en must be detailed enough to maintain visual consistency across video segments.
-- Output JSON array only."""
+- region_en and region_zh MUST be filled with a concise casting-region label; infer from story context, names, and dialogue when possible.
+- description_en must include one sentence "The regional appearance is …" that agrees with region_en.
+- description_en must be a series of complete English sentences, each describing one visual attribute in the format "The [attribute] is [value]." — NOT comma-separated tags.
+- Include ONLY observable appearance: gender, age, build, regional appearance (Eastern vs Western etc.), hair (color + type + length), eye color, skin tone, main clothing top/bottom, footwear.
+- EXCLUDE: expressions, emotions, actions, personality, detailed cosmetics, accessories unless plot-critical.
+- Keep each description covering about 11-19 visual attributes per character (including regional appearance).
+- Output JSON array only, no extra text."""
 
 
 def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -> list[dict[str, Any]]:
@@ -1276,6 +1343,9 @@ def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -
         "Extract all named characters and write detailed descriptions. Output JSON array only."
     )
 
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     try:
         completion = client.chat.completions.create(
             model=use_model,
@@ -1285,6 +1355,7 @@ def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -
             ],
         )
         raw = (completion.choices[0].message.content or "").strip()
+        _log.info("Subject LLM raw response (first 500 chars): %s", raw[:500])
         # 提取 JSON 数组
         import re as _re
         m = _re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
@@ -1293,9 +1364,12 @@ def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -
         start = raw.find("[")
         end = raw.rfind("]")
         if start >= 0 and end > start:
-            return json.loads(raw[start:end + 1])
-    except Exception:
-        pass
+            parsed = json.loads(raw[start:end + 1])
+            _log.info("Subject parsed OK: %d characters", len(parsed))
+            return parsed
+        _log.warning("Subject LLM response did not contain a valid JSON array")
+    except Exception as exc:
+        _log.error("Subject generation failed: %s", exc, exc_info=True)
     return []
 
 

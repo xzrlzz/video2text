@@ -191,12 +191,12 @@ JSON SCHEMA STRUCTURE:
       "camera_movement": "string",
       "scene_description": "string (detailed visual of the environment and composition. MUST include spatial reference that persists across adjacent shots: e.g., 'same room, opposite corner', 'same park bench, different angle')",
       "character_action": "string (MUST use Present Continuous tense: 'is walking', 'is staring', etc.)",
-      "dialogue": "string",
+      "dialogue": "string (Speaker-attributed lines. Each line MUST begin with speaker name: 'CharName: spoken words'. Multiple lines separated by newlines. No stage directions, no SFX. Empty string if no speech.)",
       "mood": "string",
       "lighting": "string (MUST follow format: Direction + Hard/Soft + Source. MUST remain consistent within the same scene/location. Example: 'Top-left hard key light from window, soft fill from practical lamp')",
       "ambient_sound": "string (ONLY diegetic, in-world sounds. Describe what is heard within the scene: footsteps, wind, traffic, etc. Do NOT include musical score here.)",
       "score_suggestion": "string (Optional post-production music reference. Not for AI sound generation.)",
-      "generation_prompt": "string (CRITICAL RULES below. MUST include spatial continuity cues.)",
+      "generation_prompt": "string (CRITICAL RULES below. MUST include spatial continuity cues. Balance ~50% character appearance + ~50% cinematography/staging.)",
       "duration_sec": number,
       "cut_rhythm": "string (One of: 'SMASH_CUT', 'STANDARD_CUT', 'LINGERING_CUT', 'JUMP_CUT', 'MATCH_CUT'. Determines how this shot transitions from previous.)",
       "negative_prompt_hint": "string (Specific elements to avoid in this shot: e.g., 'distorted face, extra limbs, text, slow motion, scene change hallucination')"
@@ -235,17 +235,18 @@ SHOT SEQUENCING AND TIMING RULES (SHORT-FORM VIDEO — FAST PACING):
 - Every sequence of 3 shots must contain at least one clear visual link (object, color, motion, or spatial reference) that connects them.
 
 GENERATION_PROMPT CONSTRUCTION RULES (EXTREMELY CRITICAL):
-Each generation_prompt MUST be a single, cohesive English sentence or paragraph that includes:
-1. FRAMING: Translate shot_type into explicit visual language. Do NOT use film terms like "CU" alone. Write: "Close-up framing from nose to forehead" or "Wide shot showing full body and surrounding forest".
-2. KEY POSE ANCHOR: Describe the subject's EXACT initial physical state to lock the starting frame. Use: "standing motionless", "seated with hands folded", "mid-stride frozen". This prevents unwanted jitter.
-3. ACTION: Use PRESENT CONTINUOUS tense. "She is walking slowly towards camera" NOT "She walks".
-4. SPATIAL CONTINUITY CUE: Include a visual anchor that ties this shot to the established location or previous shot. Example: "The same rain-streaked window from the previous shot now fills the background."
-5. LIGHTING MOOD: Incorporate the lighting field description naturally into the visual scene.
-6. CHARACTER REFERENCE: Use the character's EXACT name from the characters list. For downstream consistency, the prompt must reference the character's visual traits as described in the character list.
-7. CINEMATIC QUALIFIER: Append a short style anchor: "Cinematic 35mm film, shallow depth of field, natural motion blur."
+Each generation_prompt MUST be a single, cohesive paragraph balanced ~50% character appearance + ~50% cinematography/staging:
+1. CHARACTER APPEARANCE FIRST: For each character in the shot, write their name followed by key visual traits in parentheses (gender, approximate age, build, hair color/style/length, main clothing). E.g.: 'Emma (young woman, slim, long black straight hair, white blouse, blue jeans)'.
+2. FRAMING: Translate shot_type into explicit visual language. Do NOT use film terms like "CU" alone.
+3. KEY POSE ANCHOR: Describe the subject's EXACT initial physical state.
+4. ACTION: Use PRESENT CONTINUOUS tense.
+5. SPATIAL CONTINUITY CUE: Include a visual anchor linking to previous shot.
+6. LIGHTING MOOD: Incorporate the lighting field description naturally.
+7. CINEMATIC QUALIFIER: Append a short style anchor.
+8. If dialogue occurs in this shot, quote it with exact words in the generation_prompt.
 
-GENERATION_PROMPT EXAMPLE (Showing continuity with previous shot):
-"Medium shot framing from waist to top of head. EMMA is standing motionless in the same dim hallway from the establishing shot, her back now against the peeling wallpaper. She is staring directly into the lens with a tense expression, her eyes darting slightly leftward following the sound heard in previous shot. Hard key light from a single overhead bulb casting sharp shadows across her jawline. Cinematic 35mm film, shallow depth of field, natural motion blur."
+GENERATION_PROMPT EXAMPLE:
+"Emma (young woman, slim, long black straight hair, white blouse, blue jeans), medium shot framing from waist to top of head. She is standing motionless in the same dim hallway from the establishing shot, her back now against the peeling wallpaper, staring directly into the lens with a tense expression, her eyes darting slightly leftward. Hard key light from a single overhead bulb. Cinematic 35mm film, shallow depth of field."
 
 AUDIO FIELD CLARIFICATION:
 - ambient_sound: STRICTLY for sounds occurring inside the world of the film (doors creaking, wind, footsteps). This may be used for AI sound effect generation. If there is no dialogue, ambient_sound MUST be populated to prevent dead air.
@@ -253,15 +254,14 @@ AUDIO FIELD CLARIFICATION:
 - score_suggestion: For post-production reference ONLY. Do not merge with ambient_sound.
 
 DIALOGUE FORMAT:
-- Format: "CHARACTER_NAME: \\"Exact dialogue text.\\""
-- Use exact character names from the characters list.
-- Empty string "" for shots with no spoken words.
+- Each spoken line MUST begin with the character's name: "CharName: spoken words".
+- Multiple utterances in one shot: separate with single newlines, each prefixed with speaker name.
+- No stage directions (not "(whispering)"), no narrator text, no SFX. Empty string "" for shots with no speech.
 
-LANGUAGE ENFORCEMENT (ABSOLUTE — ZERO EXCEPTIONS):
-- ALL JSON text fields must be ENGLISH. No Chinese, Japanese, Korean, or ANY non-English characters allowed.
-- ALL dialogue MUST be in English. Characters MUST speak English. Even if the user's theme/brief is in Chinese, you MUST write all dialogue in natural, fluent English. Treat it like dubbing a film into English.
-- If the story setting requires non-English environmental text (e.g., a street sign in Chinese), describe it in English within scene_description: "A neon sign with Chinese characters glowing red."
-- VALIDATION: Before outputting, scan every "dialogue" field — if ANY contains non-English characters, rewrite it in English.
+LANGUAGE RULES:
+- Every field **except** dialogue must be in **English**.
+- **dialogue field (language):** Use **English** for spoken lines when the story is English-language (default). If the user's theme/brief is **primarily in Chinese** or explicitly requests **Chinese dialogue**, write spoken lines in **Chinese** (still speaker-prefixed, e.g. "小明: 你好吗？"); do **not** translate Chinese lines to English in dialogue. All other JSON fields stay English.
+- Do NOT paraphrase dialogue elsewhere: character_action may describe how they speak; dialogue holds speaker-attributed lines only.
 
 PACING AND TENSION BUILDING (SHORT-FORM — EVERY SECOND COUNTS):
 - DEFAULT: Most shots are ~2 seconds. Only add time for dialogue delivery.
@@ -288,12 +288,12 @@ STRICT REQUIREMENTS:
   "camera_movement": "Camera movement with speed, in English. E.g.: static, slow push-in, fast pan left",
   "scene_description": "Environment, composition, key props. MUST include spatial reference that connects to the established scene.",
   "character_action": "Use Present Continuous tense. MUST include: (1) micro-expressions; (2) body language; (3) movement quality. No appearance/outfit details.",
-  "dialogue": "CHARACTER_NAME: \\"Exact dialogue text.\\" — or empty string \\"\\" if no dialogue",
+  "dialogue": "Speaker-attributed: CharName: spoken words; multiple lines → single newlines; or empty string",
   "mood": "Emotional atmosphere in English",
   "lighting": "Direction + Hard/Soft + Source. Must be consistent with the scene's established lighting.",
   "ambient_sound": "Diegetic, in-world sounds ONLY (footsteps, wind, etc.). Maintain continuity with previous shots.",
   "score_suggestion": "Optional post-production music reference.",
-  "generation_prompt": "PURE ENGLISH. Single paragraph. Include: [shot scale + camera move] + [spatial continuity cue from previous shot] + [subject blocking with screen direction] + [key action with micro-expressions] + [lighting with motivated source] + [cinematic style]. MUST use character's actual name.",
+  "generation_prompt": "Single paragraph, balanced ~50% character appearance + ~50% cinematography/staging. Character name with key visual traits in parentheses first, then camera/staging. Quote dialogue with exact words if speech occurs. MUST use character's actual name.",
   "duration_sec": 2.0,
   "cut_rhythm": "SMASH_CUT, STANDARD_CUT, LINGERING_CUT, JUMP_CUT, or MATCH_CUT",
   "negative_prompt_hint": "Elements to avoid: e.g., 'distorted face, extra limbs, text, slow motion, scene change hallucination'"
@@ -533,7 +533,8 @@ def _single_pass_generate(
     user_msg = (
         f"Story theme / creative brief:\n{theme}\n\n"
         f"Generate {min_shots}–{max_shots} shots (shots array length must fall within this range)."
-        f"{extra}\nOutput JSON only. All text fields must be in English. ALL dialogue must be in English — no Chinese or other non-English text."
+        f"{extra}\nOutput JSON only. All fields English except dialogue: dialogue = spoken words only "
+        "(speaker-prefixed); lines in English unless the brief is Chinese / Chinese dialogue requested."
     )
     completion = client.chat.completions.create(
         model=model,
@@ -594,7 +595,10 @@ def generate_next_shot(
         context_lines.append(
             f"  Shot {i}: {' | '.join(p for p in parts if p)}"
         )
-    context_lines.append("\nWrite the next shot as a single JSON object. Output JSON only. All fields in English. ALL dialogue MUST be in English — no Chinese or other non-English text.")
+    context_lines.append(
+        "\nWrite the next shot as a single JSON object. Output JSON only. "
+        "All fields English except dialogue (spoken words only, no speaker labels; match prior dialogue language)."
+    )
 
     user_msg = "\n".join(context_lines)
 
