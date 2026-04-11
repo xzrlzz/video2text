@@ -40,6 +40,7 @@
       <p class="hint">主题创作或上传视频分析，生成分镜 JSON（保存在 workspace 任务目录）。</p>
       <div class="tabs" id="source-tabs">
         <button type="button" class="active" data-tab="theme">主题创作</button>
+        <button type="button" data-tab="ip-mode">IP 模式</button>
         <button type="button" data-tab="analyze">视频分析</button>
       </div>
 
@@ -73,6 +74,46 @@
         <div class="flex" style="margin-top:16px;">
           <button type="button" class="primary" id="btn-theme">一键生成全部分镜</button>
           <button type="button" id="btn-run-theme">一步：主题 + 生成视频</button>
+        </div>
+      </div>
+
+      <!-- IP 模式面板 -->
+      <div id="panel-ip-mode" class="hidden">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <label style="margin-bottom:0;">选择 IP</label>
+          <div style="display:flex;gap:6px;">
+            <button type="button" class="ghost sm" id="btn-refresh-ips">刷新</button>
+            <button type="button" class="primary sm" id="btn-create-ip">+ 创建新 IP</button>
+          </div>
+        </div>
+        <select id="ip-select" style="width:100%;margin-bottom:12px;">
+          <option value="">— 请选择或创建 IP —</option>
+        </select>
+        <div id="ip-detail-panel" class="hidden" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:start;">
+            <div>
+              <strong id="ip-detail-name"></strong>
+              <span id="ip-detail-tagline" style="color:var(--muted);margin-left:8px;"></span>
+            </div>
+            <button type="button" class="ghost sm" id="btn-manage-ip">管理</button>
+          </div>
+          <div id="ip-characters-preview" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;"></div>
+        </div>
+        <label>本期主题提示（可选）</label>
+        <input type="text" id="ip-theme-hint" placeholder="如：阿肥偷吃被发现" />
+        <div class="row">
+          <div>
+            <label>最少镜头</label>
+            <input type="number" id="ip-min-shots" value="8" min="3" max="40" />
+          </div>
+          <div>
+            <label>最多镜头</label>
+            <input type="number" id="ip-max-shots" value="16" min="3" max="60" />
+          </div>
+        </div>
+        <div class="flex" style="margin-top:16px;">
+          <button type="button" class="primary" id="btn-ip-gen-storyboard">生成 IP 分镜</button>
+          <button type="button" id="btn-ip-gen-all">IP 分镜 + 生成视频</button>
         </div>
       </div>
 
@@ -332,6 +373,64 @@
     <div id="cleanup-result" style="font-size:12px;color:var(--muted);white-space:pre-wrap;"></div>
 
     <button type="button" class="ghost" id="btn-close-users" style="margin-top:16px;">关闭</button>
+  </aside>
+
+  <!-- IP 创建向导抽屉 -->
+  <div class="drawer-overlay" id="overlay-ip-create"></div>
+  <aside class="drawer" id="drawer-ip-create" style="max-width:640px;">
+    <h3>创建新 IP</h3>
+
+    <!-- Step 1: 种子创意 -->
+    <div id="ip-create-step1">
+      <label>种子创意</label>
+      <textarea id="ip-seed-idea" placeholder="例如：胖猫的搞笑日常、外星人在地球摆摊卖小吃…" rows="3"></textarea>
+
+      <label style="margin-top:12px;">选择画面风格（可选）</label>
+      <div id="ip-style-tabs" class="tabs" style="margin-bottom:8px;flex-wrap:wrap;gap:4px;"></div>
+      <div id="ip-style-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;max-height:240px;overflow-y:auto;margin-bottom:12px;"></div>
+      <input type="hidden" id="ip-selected-style" />
+
+      <div class="flex" style="margin-top:16px;">
+        <button type="button" class="primary" id="btn-ip-gen-proposal">生成 IP 提案</button>
+        <button type="button" class="ghost" id="btn-close-ip-create">取消</button>
+      </div>
+      <div id="ip-creating-spinner" class="hidden" style="margin-top:12px;color:var(--muted);">正在生成 IP 提案，请稍候…</div>
+    </div>
+
+    <!-- Step 2: 审阅提案 -->
+    <div id="ip-create-step2" class="hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h4 id="ip-proposal-name"></h4>
+        <span id="ip-proposal-tagline" style="color:var(--muted);font-size:13px;"></span>
+      </div>
+
+      <label>视觉风格</label>
+      <div id="ip-proposal-visual" style="padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-bottom:8px;"></div>
+
+      <label>故事模式</label>
+      <div id="ip-proposal-story" style="padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-bottom:8px;"></div>
+
+      <label>世界设定</label>
+      <div id="ip-proposal-world" style="padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-bottom:8px;"></div>
+
+      <label>角色花名册</label>
+      <div id="ip-proposal-characters" style="margin-bottom:8px;"></div>
+
+      <div class="flex" style="margin-top:16px;">
+        <button type="button" class="primary" id="btn-ip-confirm">确认并生成角色图</button>
+        <button type="button" class="ghost" id="btn-ip-regen-proposal">重新生成</button>
+        <button type="button" class="ghost" id="btn-ip-cancel-proposal">取消</button>
+      </div>
+      <div id="ip-confirming-spinner" class="hidden" style="margin-top:12px;color:var(--muted);">正在保存并生成角色图…</div>
+    </div>
+  </aside>
+
+  <!-- IP 管理抽屉 -->
+  <div class="drawer-overlay" id="overlay-ip-manage"></div>
+  <aside class="drawer" id="drawer-ip-manage" style="max-width:640px;">
+    <h3 id="ip-manage-title">IP 管理</h3>
+    <div id="ip-manage-content"></div>
+    <button type="button" class="ghost" id="btn-close-ip-manage" style="margin-top:16px;">关闭</button>
   </aside>
 
   <script src="/static/app.js"></script>

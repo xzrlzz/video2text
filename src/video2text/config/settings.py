@@ -81,6 +81,9 @@ class Settings:
     video_gen_model: str = "wan2.7-t2v"
     video_ref_model: str = "wan2.7-r2v"
     default_resolution: str = "720*1280"
+    image_gen_model: str = "wan2.7-image-pro"
+    image_gen_thinking_mode: bool = True
+    image_gen_size: str = "2K"
     max_video_base64_mb: float = 7.0
     scene_detect_threshold: float = 27.0
     analysis_fps: float = 2.0
@@ -191,6 +194,19 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         )
     )
 
+    img_model = str(
+        _env_or_file(
+            "IMAGE_GEN_MODEL", file_cfg, "image_gen_model", Settings.image_gen_model
+        )
+    )
+    img_thinking_raw = _env_or_file(
+        "IMAGE_GEN_THINKING_MODE", file_cfg, "image_gen_thinking_mode", True
+    )
+    img_thinking = _as_bool(img_thinking_raw, default=True)
+    img_size = str(
+        _env_or_file("IMAGE_GEN_SIZE", file_cfg, "image_gen_size", Settings.image_gen_size)
+    )
+
     max_b64 = _env_or_file(
         "V2T_MAX_VIDEO_BASE64_MB", file_cfg, "max_video_base64_mb", 9.0
     )
@@ -208,6 +224,9 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         video_gen_model=gen,
         video_ref_model=ref_gen,
         default_resolution=resolution,
+        image_gen_model=img_model,
+        image_gen_thinking_mode=img_thinking,
+        image_gen_size=img_size,
         max_video_base64_mb=float(max_b64),
         scene_detect_threshold=float(threshold),
         analysis_fps=float(fps),

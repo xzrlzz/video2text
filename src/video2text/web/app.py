@@ -1429,6 +1429,292 @@ def api_admin_cleanup():
 
 
 # ---------------------------------------------------------------------------
+# IP 管理 API
+# ---------------------------------------------------------------------------
+
+from video2text.core.styles import get_all_style_presets, get_style_by_id, search_styles
+from video2text.core.ip_manager import (
+    delete_ip,
+    list_ips,
+    load_ip,
+    save_ip,
+    save_character_reference_image,
+    update_character_reference_in_profile,
+)
+from video2text.core.ip_creator import (
+    create_ip_from_proposal,
+    generate_character_images,
+    generate_ip_proposal,
+)
+from video2text.core.theme import generate_storyboard_from_ip
+
+
+@app.route("/api/styles")
+def api_styles():
+    """获取分类风格预设列表。"""
+    q = request.args.get("q", "").strip()
+    if q:
+        return jsonify(search_styles(q))
+    return jsonify(get_all_style_presets())
+
+
+@app.route("/api/styles/<style_id>")
+def api_style_detail(style_id: str):
+    """获取单个风格预设。"""
+    style = get_style_by_id(style_id)
+    if not style:
+        return jsonify({"error": "风格不存在"}), 404
+    return jsonify(style)
+
+
+@app.route("/api/ips")
+def api_list_ips():
+    """列出当前用户的所有 IP。"""
+    user = _require_user()
+    ips = list_ips(user)
+    return jsonify([ip.to_dict() for ip in ips])
+
+
+@app.route("/api/ip/<ip_id>")
+def api_get_ip(ip_id: str):
+    """获取 IP 详情。"""
+    user = _require_user()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    return jsonify(ip.to_dict())
+
+
+@app.route("/api/ip/create", methods=["POST"])
+def api_create_ip():
+    """从种子创意生成 IP 提案。"""
+    user = _require_user()
+    data = request.json or {}
+    seed = data.get("seed_idea", "").strip()
+    if not seed:
+        return jsonify({"error": "请输入种子创意"}), 400
+    style_preset_id = data.get("style_preset_id", "")
+
+    try:
+        settings = load_settings()
+        proposal = generate_ip_proposal(
+            seed, settings, style_preset_id=style_preset_id,
+        )
+        return jsonify({"proposal": proposal})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ip/confirm", methods=["POST"])
+def api_confirm_ip():
+    """确认 IP 提案并保存，可选立即生成角色图。"""
+    user = _require_user()
+    data = request.json or {}
+    proposal = data.get("proposal")
+    if not proposal:
+        return jsonify({"error": "缺少 proposal"}), 400
+    generate_images = data.get("generate_images", True)
+
+    try:
+        profile = create_ip_from_proposal(proposal, user)
+
+        if generate_images:
+            settings = load_settings()
+            profile = generate_character_images(profile, user, settings)
+
+        return jsonify({"ip": profile.to_dict()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ip/<ip_id>", methods=["PUT"])
+def api_update_ip(ip_id: str):
+    """更新 IP 元数据。"""
+    user = _require_user()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+
+    data = request.json or {}
+    from video2text.core.ip_manager import IPProfile
+    updated = IPProfile.from_dict({**ip.to_dict(), **data, "id": ip_id})
+    save_ip(user, updated)
+    return jsonify(updated.to_dict())
+
+
+@app.route("/api/ip/<ip_id>", methods=["DELETE"])
+def api_delete_ip(ip_id: str):
+    """删除 IP 及其所有资产。"""
+    user = _require_user()
+    if delete_ip(user, ip_id):
+        return jsonify({"ok": True})
+    return jsonify({"error": "IP 不存在"}), 404
+
+
+@app.route("/api/ip/<ip_id>/character/<char_id>/regenerate", methods=["POST"])
+def api_regenerate_character_image(ip_id: str, char_id: str):
+    """重新生成角色参考图。"""
+    user = _require_user()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    char = ip.get_character(char_id)
+    if not char:
+        return jsonify({"error": "角色不存在"}), 404
+
+    try:
+        settings = load_settings()
+        ip = generate_character_images(ip, user, settings, char_ids=[char_id])
+        return jsonify({"ip": ip.to_dict()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ip/<ip_id>/character/<char_id>/upload", methods=["POST"])
+def api_upload_character_image(ip_id: str, char_id: str):
+    """上传替换角色参考图。"""
+    user = _require_user()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    char = ip.get_character(char_id)
+    if not char:
+        return jsonify({"error": "角色不存在"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"error": "缺少文件"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "文件名为空"}), 400
+
+    import tempfile
+    tmp = Path(tempfile.mktemp(suffix=".jpg"))
+    f.save(str(tmp))
+    try:
+        dest = save_character_reference_image(user, ip_id, char_id, tmp)
+        ip = update_character_reference_in_profile(
+            user, ip_id, char_id, str(dest), ref_type="uploaded",
+        )
+        return jsonify({"ip": ip.to_dict() if ip else {}})
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@app.route("/api/task/ip-theme", methods=["POST"])
+def api_task_ip_theme():
+    """基于 IP 的主题生成任务（生成分镜 + 视频）。"""
+    user = _require_user()
+    data = request.json or {}
+    ip_id = data.get("ip_id", "").strip()
+    if not ip_id:
+        return jsonify({"error": "请指定 IP"}), 400
+
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+
+    theme_hint = data.get("theme_hint", "")
+    min_shots = int(data.get("min_shots", 8))
+    max_shots = int(data.get("max_shots", 16))
+    generate_video = data.get("generate_video", True)
+
+    task_id = uuid.uuid4().hex[:16]
+    _ensure_workspace(user)
+    task_dir = get_user_workspace_dir(user) / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "task_id": task_id,
+        "owner": user,
+        "type": "ip-theme",
+        "ip_id": ip_id,
+        "ip_name": ip.name,
+        "theme_hint": theme_hint,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (task_dir / "task.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    def _run():
+        try:
+            _update_task_meta(task_dir, {"status": "generating_storyboard"})
+            _sse_push(task_id, "正在生成 IP 分镜…")
+
+            settings = load_settings()
+            doc = generate_storyboard_from_ip(
+                ip, settings,
+                theme_hint=theme_hint,
+                min_shots=min_shots,
+                max_shots=max_shots,
+            )
+            doc.save_json(task_dir / "storyboard.json")
+            doc.save_markdown(task_dir / "storyboard.md")
+            _update_task_meta(task_dir, {"status": "storyboard_ready"})
+            _sse_push(task_id, f"分镜已生成：{len(doc.shots)} 个镜头")
+
+            if generate_video:
+                _update_task_meta(task_dir, {"status": "generating_video"})
+                _sse_push(task_id, "正在生成 IP 视频…")
+
+                from video2text.pipeline.generator import run_ip_storyboard_generation
+                run_ip_storyboard_generation(
+                    doc, ip, settings,
+                    segments_dir=task_dir / "segments",
+                    output_mp4=task_dir / "output.mp4",
+                    progress_cb=lambda m: _sse_push(task_id, m),
+                    meta_update=lambda d: _update_task_meta(task_dir, d),
+                    cancel_event=_cancel_flags.get(task_id),
+                )
+                _update_task_meta(task_dir, {"status": "done"})
+                _sse_push(task_id, "IP 视频生成完成！")
+            else:
+                _update_task_meta(task_dir, {"status": "done"})
+
+        except CancellationError:
+            _update_task_meta(task_dir, {"status": "cancelled"})
+            _sse_push(task_id, "任务已取消")
+        except Exception as e:
+            _update_task_meta(task_dir, {"status": "error", "error": str(e)})
+            _sse_push(task_id, f"错误：{e}")
+
+    cancel_evt = threading.Event()
+    _cancel_flags[task_id] = cancel_evt
+    t = threading.Thread(target=_run, daemon=True, name=f"ip-task-{task_id}")
+    with _tasks_lock:
+        _active_threads[task_id] = t
+    t.start()
+
+    return jsonify({"task_id": task_id, "status": "pending"})
+
+
+def _update_task_meta(task_dir: Path, updates: dict[str, Any]) -> None:
+    """更新任务元数据 JSON。"""
+    meta_path = task_dir / "task.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    else:
+        meta = {}
+    meta.update(updates)
+    meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _sse_push(task_id: str, message: str) -> None:
+    """向 SSE 订阅者推送消息。"""
+    with _sse_lock:
+        qs = _sse_queues.get(task_id, [])
+        for q in qs:
+            try:
+                q.put_nowait(message)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # 启动
 # ---------------------------------------------------------------------------
 

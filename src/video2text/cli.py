@@ -710,5 +710,246 @@ def cmd_run(
     )
 
 
+# ---------------------------------------------------------------------------
+# IP 子命令组
+# ---------------------------------------------------------------------------
+
+
+@cli.group("ip")
+@click.pass_context
+def ip_group(ctx: click.Context) -> None:
+    """IP 模式：创建/管理 IP，基于 IP 生成故事与视频。"""
+    pass
+
+
+@ip_group.command("create")
+@click.pass_context
+@click.option("--seed", required=True, help="种子创意描述（如'胖猫搞笑日常'）")
+@click.option("--style", "style_id", default="", help="风格预设 ID（可选，如 cartoon_3d_cute）")
+@click.option("--user", "username", default="admin", help="用户名")
+@click.option("--no-images", is_flag=True, help="跳过角色图生成")
+@click.option("-o", "--output", "output_path", type=click.Path(), help="IP JSON 输出路径（可选）")
+def ip_create(
+    ctx: click.Context,
+    seed: str,
+    style_id: str,
+    username: str,
+    no_images: bool,
+    output_path: str | None,
+) -> None:
+    """从种子创意创建新 IP。"""
+    from video2text.core.ip_creator import (
+        create_ip_from_proposal,
+        generate_character_images,
+        generate_ip_proposal,
+    )
+
+    config_path = _resolve_config_path(ctx)
+    settings = load_settings(config_path)
+
+    click.echo(f"正在从种子创意生成 IP 提案…")
+    proposal = generate_ip_proposal(seed, settings, style_preset_id=style_id)
+    click.echo(f"IP 提案：{proposal.get('name', '')} — {proposal.get('tagline', '')}")
+    click.echo(f"角色数量：{len(proposal.get('characters', []))}")
+
+    profile = create_ip_from_proposal(proposal, username)
+    click.echo(f"IP 已创建：{profile.id}")
+
+    if not no_images:
+        click.echo("正在生成角色参考图…")
+        profile = generate_character_images(
+            profile, username, settings,
+            progress_cb=lambda m: click.echo(f"  {m}"),
+        )
+
+    if output_path:
+        import json as _json
+        Path(output_path).write_text(
+            _json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        click.echo(f"IP JSON 已保存到 {output_path}")
+
+    click.echo(f"完成！IP ID: {profile.id}, 名称: {profile.name}")
+
+
+@ip_group.command("list")
+@click.option("--user", "username", default="admin", help="用户名")
+def ip_list(username: str) -> None:
+    """列出所有 IP。"""
+    from video2text.core.ip_manager import list_ips
+
+    ips = list_ips(username)
+    if not ips:
+        click.echo("暂无 IP。")
+        return
+    for ip in ips:
+        chars = ", ".join(c.name for c in ip.characters)
+        click.echo(f"  {ip.id}  {ip.name} ({ip.name_en}) — {ip.tagline}")
+        click.echo(f"         角色: {chars}")
+        click.echo(f"         风格: {ip.visual_dna.style_preset_id}")
+
+
+@ip_group.command("show")
+@click.argument("ip_id")
+@click.option("--user", "username", default="admin", help="用户名")
+def ip_show(ip_id: str, username: str) -> None:
+    """查看 IP 详情。"""
+    from video2text.core.ip_manager import load_ip
+
+    ip = load_ip(username, ip_id)
+    if not ip:
+        click.echo(f"IP {ip_id} 不存在。")
+        raise SystemExit(1)
+
+    click.echo(f"ID: {ip.id}")
+    click.echo(f"名称: {ip.name} ({ip.name_en})")
+    click.echo(f"标语: {ip.tagline}")
+    click.echo(f"风格: {ip.visual_dna.style_preset_id} — {ip.visual_dna.style_keywords}")
+    click.echo(f"类型: {ip.story_dna.genre}")
+    click.echo(f"叙事模式: {ip.story_dna.narrative_pattern}")
+    click.echo(f"世界设定: {ip.world_dna.primary_setting}")
+    click.echo(f"\n角色 ({len(ip.characters)}):")
+    for c in ip.characters:
+        ref = "✓" if c.reference_image_path else "✗"
+        click.echo(f"  [{ref}] {c.name} ({c.name_en}) — {c.role}")
+        click.echo(f"       {c.visual_description[:80]}…")
+
+
+@ip_group.command("regen-image")
+@click.argument("ip_id")
+@click.option("--char", "char_id", default=None, help="角色 ID（不指定则重新生成所有角色）")
+@click.option("--user", "username", default="admin", help="用户名")
+@click.pass_context
+def ip_regen_image(ctx: click.Context, ip_id: str, char_id: str | None, username: str) -> None:
+    """重新生成角色参考图。"""
+    from video2text.core.ip_creator import generate_character_images
+    from video2text.core.ip_manager import load_ip
+
+    ip = load_ip(username, ip_id)
+    if not ip:
+        click.echo(f"IP {ip_id} 不存在。")
+        raise SystemExit(1)
+
+    config_path = _resolve_config_path(ctx)
+    settings = load_settings(config_path)
+    char_ids = [char_id] if char_id else [c.id for c in ip.characters]
+
+    ip = generate_character_images(
+        ip, username, settings, char_ids=char_ids,
+        progress_cb=lambda m: click.echo(f"  {m}"),
+    )
+    click.echo("角色图生成完成。")
+
+
+@ip_group.command("theme")
+@click.argument("ip_id")
+@click.option("--hint", default="", help="本期主题提示（可选，如'阿肥减肥'）")
+@click.option("--user", "username", default="admin", help="用户名")
+@click.option("-o", "--output", required=True, type=click.Path(), help="分镜 JSON 输出路径")
+@click.option("--markdown", "md_path", type=click.Path(), help="可选：同时输出 Markdown")
+@click.option("--min-shots", default=8, type=int, help="最少镜头数")
+@click.option("--max-shots", default=16, type=int, help="最多镜头数")
+@click.pass_context
+def ip_theme(
+    ctx: click.Context,
+    ip_id: str,
+    hint: str,
+    username: str,
+    output: str,
+    md_path: str | None,
+    min_shots: int,
+    max_shots: int,
+) -> None:
+    """基于 IP 生成本期故事分镜。"""
+    from video2text.core.ip_manager import load_ip
+    from video2text.core.theme import generate_storyboard_from_ip
+
+    ip = load_ip(username, ip_id)
+    if not ip:
+        click.echo(f"IP {ip_id} 不存在。")
+        raise SystemExit(1)
+
+    config_path = _resolve_config_path(ctx)
+    settings = load_settings(config_path)
+
+    click.echo(f"正在为 IP '{ip.name}' 生成故事分镜…")
+    doc = generate_storyboard_from_ip(
+        ip, settings,
+        theme_hint=hint,
+        min_shots=min_shots,
+        max_shots=max_shots,
+    )
+    doc.save_json(output)
+    click.echo(f"分镜已保存到 {output}（{len(doc.shots)} 个镜头）")
+    if md_path:
+        doc.save_markdown(md_path)
+        click.echo(f"Markdown 已保存到 {md_path}")
+
+
+@ip_group.command("generate")
+@click.argument("ip_id")
+@click.argument("storyboard_json", type=click.Path(exists=True))
+@click.option("-o", "--output", required=True, type=click.Path(), help="输出视频路径")
+@click.option("--user", "username", default="admin", help="用户名")
+@click.option("--max-workers", default=2, type=int, help="并发生成数")
+@click.pass_context
+def ip_generate(
+    ctx: click.Context,
+    ip_id: str,
+    storyboard_json: str,
+    output: str,
+    username: str,
+    max_workers: int,
+) -> None:
+    """基于 IP 分镜生成视频（自动注入角色参考图）。"""
+    from video2text.core.ip_manager import load_ip
+    from video2text.pipeline.generator import run_ip_storyboard_generation
+
+    ip = load_ip(username, ip_id)
+    if not ip:
+        click.echo(f"IP {ip_id} 不存在。")
+        raise SystemExit(1)
+
+    config_path = _resolve_config_path(ctx)
+    settings = load_settings(config_path)
+    doc = StoryboardDocument.load_json(storyboard_json)
+
+    out_path = Path(output)
+    seg_dir = out_path.parent / f"{out_path.stem}_segments"
+
+    click.echo(f"正在为 IP '{ip.name}' 生成视频…")
+    run_ip_storyboard_generation(
+        doc, ip, settings,
+        segments_dir=seg_dir,
+        output_mp4=out_path,
+        progress_cb=lambda m: click.echo(f"  {m}"),
+        max_workers=max_workers,
+    )
+    click.echo(f"视频已保存到 {output}")
+
+
+@ip_group.command("styles")
+@click.option("--search", "query", default="", help="搜索关键词")
+def ip_styles(query: str) -> None:
+    """列出可用的风格预设。"""
+    from video2text.core.styles import get_all_style_presets, search_styles
+
+    if query:
+        results = search_styles(query)
+        if not results:
+            click.echo(f"未找到匹配 '{query}' 的风格。")
+            return
+        for s in results:
+            click.echo(f"  {s['id']:25s} {s['name_zh']} ({s['name_en']})")
+            click.echo(f"  {'':25s} {s['description_zh']}")
+    else:
+        presets = get_all_style_presets()
+        for cat in presets:
+            click.echo(f"\n[{cat['category_zh']}]")
+            for s in cat["styles"]:
+                click.echo(f"  {s['id']:25s} {s['name_zh']} — {s['description_zh']}")
+
+
 if __name__ == "__main__":
     cli()

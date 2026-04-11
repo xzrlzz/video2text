@@ -1384,7 +1384,9 @@
       b.classList.add('active');
       const tab = b.dataset.tab;
       $('#panel-theme').classList.toggle('hidden', tab !== 'theme');
+      $('#panel-ip-mode').classList.toggle('hidden', tab !== 'ip-mode');
       $('#panel-analyze').classList.toggle('hidden', tab !== 'analyze');
+      if (tab === 'ip-mode') loadIPList();
     };
   }
 
@@ -2084,6 +2086,298 @@
       } catch (e) { el.textContent = '清理失败: ' + e.message; }
     };
   }
+
+  // ── IP 模式 ──────────────────────────────────────────────────────────────────
+  let ipList = [];
+  let currentIPId = '';
+  let ipProposal = null;
+
+  async function loadIPList() {
+    try {
+      ipList = await api('/api/ips');
+      const sel = $('#ip-select');
+      sel.innerHTML = '<option value="">— 请选择或创建 IP —</option>';
+      ipList.forEach(ip => {
+        const opt = document.createElement('option');
+        opt.value = ip.id;
+        opt.textContent = `${ip.name} (${ip.name_en}) — ${ip.tagline}`;
+        sel.appendChild(opt);
+      });
+      if (currentIPId) sel.value = currentIPId;
+    } catch (e) {
+      showToast('加载 IP 列表失败: ' + e.message);
+    }
+  }
+
+  function showIPDetail(ip) {
+    currentIPId = ip.id;
+    const panel = $('#ip-detail-panel');
+    panel.classList.remove('hidden');
+    $('#ip-detail-name').textContent = `${ip.name} (${ip.name_en})`;
+    $('#ip-detail-tagline').textContent = ip.tagline;
+    const preview = $('#ip-characters-preview');
+    preview.innerHTML = '';
+    (ip.characters || []).forEach(c => {
+      const tag = document.createElement('span');
+      tag.style.cssText = 'padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12px;';
+      tag.textContent = `${c.name} (${c.role})`;
+      if (c.reference_image_path) tag.style.borderColor = 'var(--primary)';
+      preview.appendChild(tag);
+    });
+  }
+
+  if ($('#ip-select')) {
+    $('#ip-select').onchange = async () => {
+      const id = $('#ip-select').value;
+      if (!id) {
+        $('#ip-detail-panel').classList.add('hidden');
+        currentIPId = '';
+        return;
+      }
+      try {
+        const ip = await api(`/api/ip/${id}`);
+        showIPDetail(ip);
+      } catch (e) { showToast('加载 IP 失败: ' + e.message); }
+    };
+  }
+
+  if ($('#btn-refresh-ips')) $('#btn-refresh-ips').onclick = () => loadIPList();
+
+  // IP 分镜生成
+  async function ipGenStoryboard(withVideo) {
+    if (!currentIPId) { showToast('请先选择 IP'); return; }
+    const hint = ($('#ip-theme-hint') || {}).value || '';
+    const minShots = parseInt(($('#ip-min-shots') || {}).value || '8');
+    const maxShots = parseInt(($('#ip-max-shots') || {}).value || '16');
+    try {
+      const data = await api('/api/task/ip-theme', {
+        method: 'POST', json: true,
+        body: { ip_id: currentIPId, theme_hint: hint, min_shots: minShots, max_shots: maxShots, generate_video: withVideo },
+      });
+      showToast(`IP 任务已创建: ${data.task_id}`, 'success');
+    } catch (e) { showToast('IP 任务创建失败: ' + e.message); }
+  }
+
+  if ($('#btn-ip-gen-storyboard')) $('#btn-ip-gen-storyboard').onclick = () => ipGenStoryboard(false);
+  if ($('#btn-ip-gen-all')) $('#btn-ip-gen-all').onclick = () => ipGenStoryboard(true);
+
+  // IP 创建流程
+  async function loadStylePresets() {
+    try {
+      const categories = await api('/api/styles');
+      const tabs = $('#ip-style-tabs');
+      const grid = $('#ip-style-grid');
+      tabs.innerHTML = '';
+      grid.innerHTML = '';
+
+      categories.forEach((cat, ci) => {
+        const tabBtn = document.createElement('button');
+        tabBtn.type = 'button';
+        tabBtn.textContent = cat.category_zh;
+        tabBtn.dataset.cat = cat.category;
+        if (ci === 0) tabBtn.classList.add('active');
+        tabs.appendChild(tabBtn);
+      });
+
+      function renderGrid(category) {
+        grid.innerHTML = '';
+        const cat = categories.find(c => c.category === category);
+        if (!cat) return;
+        cat.styles.forEach(s => {
+          const card = document.createElement('div');
+          card.style.cssText = 'padding:8px 12px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;';
+          card.innerHTML = `<strong>${escapeHtml(s.name_zh)}</strong><br/><span style="color:var(--muted);">${escapeHtml(s.description_zh)}</span>`;
+          card.dataset.styleId = s.id;
+          card.onclick = () => {
+            grid.querySelectorAll('div').forEach(d => d.style.borderColor = 'var(--border)');
+            card.style.borderColor = 'var(--primary)';
+            card.style.background = 'var(--surface)';
+            $('#ip-selected-style').value = s.id;
+          };
+          grid.appendChild(card);
+        });
+      }
+
+      tabs.onclick = (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        tabs.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderGrid(btn.dataset.cat);
+      };
+
+      if (categories.length) renderGrid(categories[0].category);
+    } catch (e) { showToast('加载风格预设失败: ' + e.message); }
+  }
+
+  if ($('#btn-create-ip')) {
+    $('#btn-create-ip').onclick = () => {
+      openDrawer('ip-create');
+      $('#ip-create-step1').classList.remove('hidden');
+      $('#ip-create-step2').classList.add('hidden');
+      loadStylePresets();
+    };
+  }
+  if ($('#btn-close-ip-create')) $('#btn-close-ip-create').onclick = () => closeDrawer('ip-create');
+  if ($('#overlay-ip-create')) $('#overlay-ip-create').onclick = () => closeDrawer('ip-create');
+
+  if ($('#btn-ip-gen-proposal')) {
+    $('#btn-ip-gen-proposal').onclick = async () => {
+      const seed = ($('#ip-seed-idea') || {}).value || '';
+      if (!seed.trim()) { showToast('请输入种子创意'); return; }
+      const styleId = ($('#ip-selected-style') || {}).value || '';
+      $('#ip-creating-spinner').classList.remove('hidden');
+      try {
+        const data = await api('/api/ip/create', {
+          method: 'POST', json: true,
+          body: { seed_idea: seed, style_preset_id: styleId },
+        });
+        ipProposal = data.proposal;
+        showIPProposal(ipProposal);
+      } catch (e) { showToast('IP 提案生成失败: ' + e.message); }
+      $('#ip-creating-spinner').classList.add('hidden');
+    };
+  }
+
+  function showIPProposal(p) {
+    $('#ip-create-step1').classList.add('hidden');
+    $('#ip-create-step2').classList.remove('hidden');
+    $('#ip-proposal-name').textContent = `${p.name || ''} (${p.name_en || ''})`;
+    $('#ip-proposal-tagline').textContent = p.tagline || '';
+
+    const vd = p.visual_dna || {};
+    $('#ip-proposal-visual').innerHTML =
+      `<b>风格:</b> ${escapeHtml(vd.style_keywords || '')}<br/>` +
+      `<b>色调:</b> ${escapeHtml(vd.color_tone || '')}<br/>` +
+      `<b>光线:</b> ${escapeHtml(vd.lighting_preference || '')}`;
+
+    const sd = p.story_dna || {};
+    $('#ip-proposal-story').innerHTML =
+      `<b>类型:</b> ${escapeHtml(sd.genre || '')}<br/>` +
+      `<b>叙事模式:</b> ${escapeHtml(sd.narrative_pattern || '')}<br/>` +
+      `<b>节奏:</b> ${escapeHtml(sd.pacing || '')}<br/>` +
+      `<b>情节钩子:</b> ${(sd.typical_plot_hooks || []).map(h => escapeHtml(h)).join('; ')}`;
+
+    const wd = p.world_dna || {};
+    $('#ip-proposal-world').innerHTML =
+      `<b>主场景:</b> ${escapeHtml(wd.primary_setting || '')}<br/>` +
+      `<b>常见地点:</b> ${(wd.recurring_locations || []).join(', ')}<br/>` +
+      `<b>世界规则:</b> ${escapeHtml(wd.world_rules || '')}`;
+
+    const charDiv = $('#ip-proposal-characters');
+    charDiv.innerHTML = '';
+    (p.characters || []).forEach(c => {
+      const el = document.createElement('div');
+      el.style.cssText = 'padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px;';
+      el.innerHTML =
+        `<strong>${escapeHtml(c.name)} (${escapeHtml(c.name_en)})</strong> — ${escapeHtml(c.role)}<br/>` +
+        `<span style="color:var(--muted);">${escapeHtml((c.visual_description || '').substring(0, 150))}…</span>`;
+      charDiv.appendChild(el);
+    });
+  }
+
+  if ($('#btn-ip-confirm')) {
+    $('#btn-ip-confirm').onclick = async () => {
+      if (!ipProposal) return;
+      $('#ip-confirming-spinner').classList.remove('hidden');
+      try {
+        const data = await api('/api/ip/confirm', {
+          method: 'POST', json: true,
+          body: { proposal: ipProposal, generate_images: true },
+        });
+        showToast('IP 创建成功！', 'success');
+        closeDrawer('ip-create');
+        loadIPList();
+        if (data.ip) {
+          currentIPId = data.ip.id;
+          showIPDetail(data.ip);
+          $('#ip-select').value = data.ip.id;
+        }
+      } catch (e) { showToast('IP 确认失败: ' + e.message); }
+      $('#ip-confirming-spinner').classList.add('hidden');
+    };
+  }
+
+  if ($('#btn-ip-regen-proposal')) {
+    $('#btn-ip-regen-proposal').onclick = () => {
+      $('#ip-create-step1').classList.remove('hidden');
+      $('#ip-create-step2').classList.add('hidden');
+    };
+  }
+  if ($('#btn-ip-cancel-proposal')) {
+    $('#btn-ip-cancel-proposal').onclick = () => closeDrawer('ip-create');
+  }
+
+  // IP 管理
+  if ($('#btn-manage-ip')) {
+    $('#btn-manage-ip').onclick = async () => {
+      if (!currentIPId) return;
+      try {
+        const ip = await api(`/api/ip/${currentIPId}`);
+        $('#ip-manage-title').textContent = `管理: ${ip.name}`;
+        const content = $('#ip-manage-content');
+        content.innerHTML = '';
+
+        // 角色列表
+        (ip.characters || []).forEach(c => {
+          const div = document.createElement('div');
+          div.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;';
+          let imgHtml = c.reference_image_path ?
+            `<div style="margin-top:6px;"><img src="/api/ip/${ip.id}/character/${c.id}/image" style="max-width:120px;max-height:120px;border-radius:4px;" onerror="this.style.display='none'" /></div>` :
+            '<div style="color:var(--muted);font-size:11px;margin-top:4px;">暂无参考图</div>';
+          div.innerHTML =
+            `<div style="display:flex;justify-content:space-between;align-items:start;">` +
+            `<div><strong>${escapeHtml(c.name)}</strong> (${escapeHtml(c.name_en)}) — ${c.role}</div>` +
+            `<button type="button" class="ghost sm" data-regen="${c.id}">重新生成图</button>` +
+            `</div>` +
+            `<div style="font-size:11px;color:var(--muted);margin-top:4px;">${escapeHtml((c.visual_description || '').substring(0, 120))}</div>` +
+            imgHtml;
+          content.appendChild(div);
+        });
+
+        // 绑定重新生成
+        content.querySelectorAll('[data-regen]').forEach(btn => {
+          btn.onclick = async () => {
+            const charId = btn.dataset.regen;
+            btn.disabled = true;
+            btn.textContent = '生成中…';
+            try {
+              await api(`/api/ip/${currentIPId}/character/${charId}/regenerate`, { method: 'POST' });
+              showToast('角色图已重新生成', 'success');
+              btn.textContent = '已生成';
+            } catch (e) {
+              showToast('重新生成失败: ' + e.message);
+              btn.textContent = '重新生成图';
+              btn.disabled = false;
+            }
+          };
+        });
+
+        // 删除 IP
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'ghost sm';
+        delBtn.style.cssText = 'margin-top:12px;color:var(--danger);border-color:var(--danger);';
+        delBtn.textContent = '删除此 IP';
+        delBtn.onclick = async () => {
+          if (!confirm(`确定删除 IP "${ip.name}"？此操作不可恢复。`)) return;
+          try {
+            await api(`/api/ip/${currentIPId}`, { method: 'DELETE' });
+            showToast('IP 已删除', 'success');
+            closeDrawer('ip-manage');
+            currentIPId = '';
+            $('#ip-detail-panel').classList.add('hidden');
+            loadIPList();
+          } catch (e) { showToast('删除失败: ' + e.message); }
+        };
+        content.appendChild(delBtn);
+
+        openDrawer('ip-manage');
+      } catch (e) { showToast('加载 IP 详情失败: ' + e.message); }
+    };
+  }
+  if ($('#btn-close-ip-manage')) $('#btn-close-ip-manage').onclick = () => closeDrawer('ip-manage');
+  if ($('#overlay-ip-manage')) $('#overlay-ip-manage').onclick = () => closeDrawer('ip-manage');
 
   // ── 初始化 ───────────────────────────────────────────────────────────────────
   loadCurrentUser();

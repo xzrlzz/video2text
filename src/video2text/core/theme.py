@@ -17,6 +17,11 @@ from video2text.config.settings import Settings
 from video2text.core.analyzer import _extract_json_object, _shot_from_analysis_dict
 from video2text.core.storyboard import Shot, StoryboardDocument
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from video2text.core.ip_manager import IPProfile
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -626,3 +631,322 @@ def format_theme_source_tag(theme: str) -> str:
     """写入 source_video 字段便于区分来源（可选）。"""
     t = theme.strip().replace("\n", " ")[:120]
     return f"theme:{t}"
+
+
+# ---------------------------------------------------------------------------
+# IP 模式：专用故事/分镜生成
+# ---------------------------------------------------------------------------
+
+IP_STORY_ARCHITECT_SYSTEM = """You are an expert screenwriter for SHORT-FORM viral video content. You create standalone mini-stories for an established IP (character series).
+
+You are given the IP's COMPLETE CREATIVE GENOME: characters, world, story patterns, and visual style. Your job is to create ONE EPISODE — a self-contained 15-30 second mini-story using ONLY these characters in THEIR established world.
+
+CRITICAL CONSTRAINTS:
+1. ONLY use characters from the provided character roster. Do NOT invent new characters.
+2. Each character's actions MUST match their established behavior_patterns and personality.
+3. The story MUST follow the IP's narrative_pattern formula.
+4. VISUAL STORYTELLING: The story must be COMPLETELY UNDERSTANDABLE without audio. Every beat must be conveyed through ACTION, EXPRESSION, and PHYSICAL REACTION.
+5. FAST PACING: Each beat should be filmable in 2-3 seconds. No slow moments.
+6. EXAGGERATED EXPRESSIONS: Characters should have big, readable reactions — this is short-form content for small screens.
+7. Scenes should use the IP's recurring_locations.
+
+Output **strict JSON only** (no Markdown code blocks, no preamble). ALL fields in ENGLISH — this is NON-NEGOTIABLE.
+
+LANGUAGE RULE (ABSOLUTE — ZERO EXCEPTIONS):
+- Every single text field in the JSON MUST be written in English. No Chinese, Japanese, Korean, or ANY non-English characters allowed anywhere.
+- ALL dialogue MUST be in English.
+
+{
+  "title": "Episode title reflecting the mini-story",
+  "logline": "One sentence: what happens in this episode?",
+  "synopsis": "2-3 sentences covering the complete mini-story arc.",
+  "setting": {
+    "primary_location": "Which recurring location from the IP world (with visual details)",
+    "time_of_day": "dawn / morning / midday / afternoon / dusk / night",
+    "atmosphere": "Mood of this episode's environment"
+  },
+  "characters_featured": ["EXACT character names from the IP roster that appear in this episode"],
+  "narrative_beats": [
+    {
+      "beat_id": 1,
+      "beat_type": "SETUP | INCITING_INCIDENT | RISING_ACTION | CLIMAX | RESOLUTION",
+      "description": "VISUALLY CONCRETE: What does the camera SEE? What physical action happens?",
+      "characters_involved": ["exact character names"],
+      "emotional_tone": "What the AUDIENCE should feel",
+      "key_action": "THE specific physical action (2-3 seconds). Must match character's behavior_patterns.",
+      "dialogue": "'Speaker: \"Line.\"' or empty string",
+      "visual_focus": "What is the CENTER of the frame?"
+    }
+  ],
+  "emotional_arc_summary": "How emotion builds and resolves in this 15-30 second story."
+}
+
+STORY QUALITY FOR SHORT-FORM:
+1. START IN MEDIA RES: No slow setup. First beat should hook immediately.
+2. CAUSE AND EFFECT: Clear visual cause → exaggerated reaction → consequence.
+3. PUNCHLINE ENDING: End with a visual gag, twist, or satisfying payoff.
+4. VISUAL VARIETY: Mix close-ups (expressions), medium shots (action), wide shots (reaction).
+5. CHARACTER-DRIVEN: The humor/emotion comes FROM the characters' established quirks.
+
+BEAT COUNT: 4-8 beats for a 15-30 second video. Each beat = 2-3 seconds of screen time."""
+
+
+IP_SHOT_DESIGNER_SYSTEM = """You are a professional storyboard director for SHORT-FORM viral video content. You are given a COMPLETED STORY OUTLINE for an IP episode, plus the IP's character roster and visual style. Your job is to EXECUTE this story as a shot list.
+
+STRICT REQUIREMENTS:
+- Output **strict JSON only** (no Markdown code blocks, no preamble).
+- ALL text fields must be in ENGLISH — ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere.
+- ALL dialogue MUST be in English.
+- Do NOT change the story from the outline. Faithfully translate each beat into shots.
+- characters_in_shot MUST use the EXACT character names from the IP roster.
+
+JSON SCHEMA:
+{
+  "title": "string",
+  "synopsis": "string",
+  "rhythm_profile": "TENSE_RAPID | ACTION_DRIVEN | EMOTIONAL_CRESCENDO",
+  "characters": [{"name": "EXACT character name", "description": "visual description from IP"}],
+  "shots": [
+    {
+      "shot_id": 1,
+      "narrative_beat_id": 1,
+      "continuity_anchor": "Visual link to previous shot",
+      "characters_in_shot": ["EXACT character names from IP roster"],
+      "focal_character": "primary character or null",
+      "shot_type": "ECU / CU / MCU / MS / WS",
+      "camera_movement": "static / slow push-in / quick pan / etc.",
+      "scene_description": "Environment with IP world details",
+      "character_action": "Present Continuous. Include: micro-expression + body language + movement.",
+      "dialogue": "'CHARACTER: \"Line.\"' or empty string",
+      "mood": "emotional atmosphere",
+      "lighting": "Direction + Hard/Soft + Source",
+      "ambient_sound": "Diegetic sounds only",
+      "score_suggestion": "Optional music reference",
+      "generation_prompt": "CRITICAL — see rules below",
+      "duration_sec": 2.0,
+      "cut_rhythm": "SMASH_CUT / STANDARD_CUT / MATCH_CUT / JUMP_CUT",
+      "negative_prompt_hint": "Elements to avoid"
+    }
+  ]
+}
+
+GENERATION_PROMPT RULES FOR IP MODE:
+Each generation_prompt must:
+1. Use the character's EXACT English name (name_en from IP roster) — this will later be replaced with reference image tags.
+2. Include the character's KEY VISUAL TRAITS from their visual_description for reinforcement.
+3. Append the IP's style keywords at the end (provided below).
+4. Follow the formula: [framing + camera] + [spatial anchor] + [CHARACTER_NAME + key visual traits] + [motivated action with exaggerated expression] + [lighting] + [IP style keywords].
+
+EXAMPLE:
+"Medium shot, static camera. In a bright modern kitchen with a large window. CHUBBY (a plump orange tabby cat in blue hoodie) is reaching with both paws toward a fish-shaped cake on the counter, his big green eyes wide with desire, tongue slightly out. Warm natural light from the window. 3D cartoon style, chibi, vibrant colors, soft lighting, Pixar style."
+
+TIMING (SHORT-FORM — ULTRA FAST):
+- DEFAULT 2s for all non-dialogue shots.
+- DIALOGUE shots get 3s max.
+- NEVER exceed 4s.
+- Prefer SMASH_CUT. Every shot must advance the story.
+
+IP STYLE KEYWORDS TO APPEND:
+{style_keywords}"""
+
+
+def _build_ip_character_roster(profile: IPProfile) -> str:
+    """格式化 IP 角色花名册供 LLM prompt 使用。"""
+    lines: list[str] = []
+    for c in profile.characters:
+        lines.append(
+            f"- {c.name} ({c.name_en}): role={c.role}, "
+            f"visual={c.visual_description[:200]}, "
+            f"personality={c.personality}, "
+            f"behaviors={c.behavior_patterns}"
+        )
+    return "\n".join(lines)
+
+
+def _generate_ip_story_outline(
+    profile: IPProfile,
+    theme_hint: str,
+    client: OpenAI,
+    model: str,
+    min_shots: int,
+    max_shots: int,
+) -> dict[str, Any]:
+    """Phase 1 (IP mode): 基于 IP 世界观生成单集故事大纲。"""
+    char_roster = _build_ip_character_roster(profile)
+
+    user_msg = (
+        f"=== IP CREATIVE GENOME ===\n"
+        f"IP Name: {profile.name} ({profile.name_en})\n"
+        f"Tagline: {profile.tagline}\n\n"
+        f"VISUAL STYLE: {profile.visual_dna.style_keywords_en}\n"
+        f"Color Tone: {profile.visual_dna.color_tone}\n\n"
+        f"STORY DNA:\n"
+        f"  Genre: {profile.story_dna.genre}\n"
+        f"  Narrative Pattern: {profile.story_dna.narrative_pattern}\n"
+        f"  Emotional Tone: {profile.story_dna.emotional_tone}\n"
+        f"  Pacing: {profile.story_dna.pacing}\n"
+        f"  Episode Structure: {profile.story_dna.episode_structure}\n"
+        f"  Plot Hook Ideas: {json.dumps(profile.story_dna.typical_plot_hooks, ensure_ascii=False)}\n\n"
+        f"WORLD:\n"
+        f"  Primary Setting: {profile.world_dna.primary_setting}\n"
+        f"  Recurring Locations: {profile.world_dna.recurring_locations}\n"
+        f"  World Rules: {profile.world_dna.world_rules}\n\n"
+        f"CHARACTER ROSTER:\n{char_roster}\n\n"
+        f"=== END IP GENOME ===\n\n"
+    )
+
+    if theme_hint.strip():
+        user_msg += f"Episode theme hint: {theme_hint.strip()}\n\n"
+    else:
+        user_msg += "Create an episode using one of the typical_plot_hooks as inspiration.\n\n"
+
+    user_msg += (
+        f"Design a mini-story with {max(3, min_shots * 2 // 3)}-{max_shots} narrative beats.\n"
+        f"Each beat = 2-3 seconds of screen time.\n"
+        f"Output JSON only. All fields in English."
+    )
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": IP_STORY_ARCHITECT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=8192,
+    )
+    raw = completion.choices[0].message.content or ""
+    return _extract_json_object(raw)
+
+
+def _generate_ip_shots_from_outline(
+    outline: dict[str, Any],
+    profile: IPProfile,
+    client: OpenAI,
+    model: str,
+    min_shots: int,
+    max_shots: int,
+) -> dict[str, Any]:
+    """Phase 2 (IP mode): 基于大纲和 IP 角色生成分镜。"""
+    style_kw = profile.visual_dna.style_keywords_en or profile.visual_dna.style_keywords
+    system = IP_SHOT_DESIGNER_SYSTEM.replace("{style_keywords}", style_kw)
+
+    char_info = []
+    for c in profile.characters:
+        char_info.append({
+            "name": c.name,
+            "name_en": c.name_en,
+            "visual_description": c.visual_description,
+        })
+
+    outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
+    char_json = json.dumps(char_info, ensure_ascii=False, indent=2)
+
+    user_msg = (
+        f"=== STORY OUTLINE ===\n{outline_json}\n=== END OUTLINE ===\n\n"
+        f"=== IP CHARACTER VISUAL REFERENCE ===\n{char_json}\n=== END CHARACTERS ===\n\n"
+        f"Design {min_shots}-{max_shots} shots. Use EXACT character names.\n"
+        f"The generation_prompt for each shot MUST include the character's name_en "
+        f"and key visual traits, followed by the IP style keywords.\n"
+        f"Output JSON only. All fields in English."
+    )
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=16384,
+    )
+    raw = completion.choices[0].message.content or ""
+    return _extract_json_object(raw)
+
+
+def generate_storyboard_from_ip(
+    ip_profile: IPProfile,
+    settings: Settings,
+    *,
+    theme_hint: str = "",
+    min_shots: int = 8,
+    max_shots: int = 16,
+    model: str | None = None,
+) -> StoryboardDocument:
+    """IP 模式：两阶段流程生成分镜文档。
+
+    Phase 1 — IP Story Architect: 基于 IP 世界观生成单集故事
+    Phase 2 — IP Shot Designer: 分镜设计，generation_prompt 中引用角色名
+    """
+    min_shots = max(3, min(40, int(min_shots)))
+    max_shots = max(min_shots, min(60, int(max_shots)))
+
+    client = OpenAI(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.base_url,
+    )
+    use_model = (model or settings.theme_story_model or settings.vision_model).strip()
+    if not use_model:
+        use_model = settings.vision_model
+
+    # Phase 1
+    log.info("IP Phase 1 — Story Architect for IP %r…", ip_profile.name)
+    outline = _generate_ip_story_outline(
+        ip_profile, theme_hint, client, use_model, min_shots, max_shots,
+    )
+    beats = outline.get("narrative_beats") or []
+    log.info(
+        "IP Phase 1 complete: title=%r, %d beats",
+        outline.get("title", ""),
+        len(beats),
+    )
+
+    # Phase 2
+    log.info("IP Phase 2 — Shot Designer…")
+    data = _generate_ip_shots_from_outline(
+        outline, ip_profile, client, use_model, min_shots, max_shots,
+    )
+
+    # Build document
+    shots_data = data.get("shots") or []
+    if not isinstance(shots_data, list):
+        raise ValueError("模型返回的 shots 不是数组")
+    shots = _build_shots_from_theme_items(shots_data)
+    if len(shots) < min_shots:
+        raise ValueError(
+            f"模型仅返回 {len(shots)} 个镜头，少于要求下限 {min_shots}"
+        )
+    if len(shots) > max_shots:
+        shots = shots[:max_shots]
+
+    characters_raw = data.get("characters", "")
+    characters_str = _normalize_characters_field(characters_raw)
+
+    synopsis = str(data.get("synopsis", ""))
+    if not synopsis and outline:
+        synopsis = str(outline.get("synopsis", ""))
+
+    scene_geo = ""
+    if outline and isinstance(outline.get("setting"), dict):
+        scene_geo = str(outline["setting"].get("primary_location", ""))
+
+    source_tag = f"ip:{ip_profile.id}"
+    if theme_hint:
+        source_tag += f"|{format_theme_source_tag(theme_hint)}"
+
+    doc = StoryboardDocument(
+        title=str(data.get("title", "")),
+        synopsis=synopsis,
+        characters=characters_str,
+        source_video=source_tag,
+        shots=shots,
+        raw_scene_analyses=[f"[from_ip]{ip_profile.name}"],
+        rhythm_profile=str(data.get("rhythm_profile", "")),
+        scene_geography=scene_geo,
+    )
+    if outline:
+        logline = str(outline.get("logline", ""))
+        if logline:
+            doc.logline = logline
+        arc = str(outline.get("emotional_arc_summary", ""))
+        if arc:
+            doc.pacing_flow = arc
+    return doc

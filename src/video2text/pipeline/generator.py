@@ -32,6 +32,11 @@ from video2text.services.wan_video import (
     uses_wan27_http,
 )
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from video2text.core.ip_manager import IPCharacter, IPProfile
+
 _ROLE_VIDEO_LINE = re.compile(r"^视频\s*(\d+)\s*[：:]\s*(.*)$")
 _ROLE_IMAGE_LINE = re.compile(r"^图\s*(\d+)\s*[：:]\s*(.*)$")
 # t2v subject format: "character1: Name — description" or "character1: Name: description"
@@ -1156,3 +1161,290 @@ def run_storyboard_clip_generation(
         return out.resolve()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# IP 模式：角色参考注入管线
+# ---------------------------------------------------------------------------
+
+
+def preflight_ip_character_images(
+    characters: list[IPCharacter],
+    settings: Settings,
+) -> dict[str, str]:
+    """上传所有角色参考图到 OSS，返回 {char_id: public_url} 映射。
+
+    只处理有 reference_image_path 的角色。已是 http/oss URL 的保持不变。
+    """
+    from dashscope.utils.oss_utils import check_and_upload_local
+    from video2text.services.media_normalize import normalize_local_reference_path
+
+    model = settings.video_ref_model
+    api_key = settings.dashscope_api_key
+    cert = None
+    result: dict[str, str] = {}
+
+    for char in characters:
+        path = char.reference_image_path.strip()
+        if not path:
+            continue
+        if path.startswith("http://") or path.startswith("https://") or path.startswith("oss://"):
+            result[char.id] = path
+            continue
+        local = normalize_local_reference_path(path, kind="image")
+        _, url, cert = check_and_upload_local(model, local, api_key, cert)
+        result[char.id] = url
+
+    return result
+
+
+def detect_characters_in_chunk(
+    chunk: list[Shot],
+    characters: list[IPCharacter],
+) -> list[IPCharacter]:
+    """检测 chunk 中出现的 IP 角色，按出现频率排序。
+
+    匹配逻辑：角色的 name、name_en 出现在 characters_in_shot / generation_prompt /
+    character_action / dialogue 等字段中。
+    """
+    blob = _chunk_text_blob(chunk).lower()
+
+    annotated: set[str] = set()
+    for shot in chunk:
+        for n in shot.characters_in_shot:
+            annotated.add(n.strip().lower())
+
+    scored: list[tuple[int, IPCharacter]] = []
+    for char in characters:
+        score = 0
+        names = [char.name.lower(), char.name_en.lower()]
+        names = [n for n in names if n]
+
+        for n in names:
+            if any(n in an or an in n for an in annotated):
+                score += 10
+            count = blob.count(n)
+            score += count
+
+        if score > 0:
+            scored.append((score, char))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [char for _, char in scored]
+
+
+def build_ip_media_array(
+    chunk_characters: list[IPCharacter],
+    char_url_map: dict[str, str],
+    max_refs: int = 5,
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """构建 wan2.7-r2v 的 media 数组和角色名 -> 「图N」映射。
+
+    Returns:
+        (media_array, name_to_tag_map)
+        media_array: [{"type": "image", "url": "..."}, ...]
+        name_to_tag_map: {"Chubby": "图1", "Fishy": "图2", ...}
+    """
+    media: list[dict[str, str]] = []
+    name_map: dict[str, str] = {}
+    img_index = 0
+
+    for char in chunk_characters:
+        url = char_url_map.get(char.id)
+        if not url:
+            continue
+        if img_index >= max_refs:
+            break
+        img_index += 1
+        media.append({"type": "image", "url": url})
+        tag = f"图{img_index}"
+        if char.name:
+            name_map[char.name] = tag
+        if char.name_en and char.name_en != char.name:
+            name_map[char.name_en] = tag
+
+    return media, name_map
+
+
+def rewrite_prompt_for_ip_refs(
+    prompt: str,
+    name_to_tag: dict[str, str],
+    style_keywords_en: str = "",
+) -> str:
+    """将 generation_prompt 中的角色名替换为「图N」引用格式。
+
+    也在末尾追加风格关键词（如果尚未包含）。
+    """
+    result = prompt
+    for name, tag in sorted(name_to_tag.items(), key=lambda x: len(x[0]), reverse=True):
+        result = result.replace(name, tag)
+
+    if style_keywords_en and style_keywords_en.strip() not in result:
+        result = f"{result.rstrip('.')}. {style_keywords_en.strip()}."
+
+    return result
+
+
+def build_ip_wan_clip_tasks(
+    doc: StoryboardDocument,
+    ip_profile: IPProfile,
+    settings: Settings,
+    char_url_map: dict[str, str],
+    *,
+    max_segment_seconds: float = 10.0,
+    poll_callback: Callable[[str], None] | None = None,
+) -> list[WanClipTask]:
+    """构建 IP 模式的万相视频生成任务列表。
+
+    与普通模式的区别：
+    - 每个 chunk 自动检测出场角色
+    - 构建角色图 media 数组
+    - 改写 prompt 为「图N」引用格式
+    - 追加风格关键词
+    """
+    shots = doc.shots
+    if not shots:
+        raise ValueError("Storyboard has no shots")
+
+    dur_cap = model_max_duration_seconds(settings.video_ref_model)
+    max_seg_eff = max(2.0, min(float(max_segment_seconds), float(dur_cap), 10.0))
+    chunks = chunk_shots_by_max_duration(shots, max_seg_eff)
+
+    characters = ip_profile.characters
+    style_kw = ip_profile.visual_dna.style_keywords_en or ip_profile.visual_dna.style_keywords
+
+    cb = poll_callback or (lambda _: None)
+    cb(f"IP 模式：{len(chunks)} 段，{len(characters)} 个角色，{len(char_url_map)} 张参考图已上传")
+
+    tasks: list[WanClipTask] = []
+    for i, chunk in enumerate(chunks):
+        chunk_chars = detect_characters_in_chunk(chunk, characters)
+        media, name_map = build_ip_media_array(chunk_chars, char_url_map)
+
+        prompt, dur = build_wan_multi_shot_prompt(
+            chunk, "", "", max_duration=dur_cap,
+        )
+
+        prompt = rewrite_prompt_for_ip_refs(prompt, name_map, style_kw)
+
+        ref_urls = [m["url"] for m in media if m["type"] == "image"]
+
+        if poll_callback:
+            char_names = [c.name for c in chunk_chars[:5]]
+            poll_callback(
+                f"第 {i+1}/{len(chunks)} 段：{len(chunk)} 镜头，"
+                f"角色 {char_names}，{len(ref_urls)} 张参考图"
+            )
+
+        tasks.append(
+            WanClipTask(
+                index=i,
+                prompt=prompt,
+                duration=dur,
+                reference_urls=ref_urls,
+                reference_video_urls=[],
+                reference_video_descriptions=[],
+                chunk_size=len(chunk),
+            )
+        )
+
+    return tasks
+
+
+def run_ip_storyboard_generation(
+    doc: StoryboardDocument,
+    ip_profile: IPProfile,
+    settings: Settings,
+    *,
+    segments_dir: Path,
+    output_mp4: Path,
+    size: str | None = None,
+    max_segment_seconds: float = 10.0,
+    progress_cb: Callable[[str], None] | None = None,
+    meta_update: Callable[[dict[str, Any]], None] | None = None,
+    max_workers: int = 2,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """IP 模式视频生成的完整管线。
+
+    1. 预上传角色参考图
+    2. 构建 IP 模式任务列表
+    3. 并发生成各段视频
+    4. 拼接成片
+    """
+    cb = progress_cb or (lambda _: None)
+
+    # 预上传角色图
+    cb("正在上传角色参考图…")
+    char_url_map = preflight_ip_character_images(ip_profile.characters, settings)
+    cb(f"已上传 {len(char_url_map)} 张角色参考图")
+
+    # 构建任务
+    tasks = build_ip_wan_clip_tasks(
+        doc, ip_profile, settings, char_url_map,
+        max_segment_seconds=max_segment_seconds,
+        poll_callback=cb,
+    )
+
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    if meta_update:
+        meta_update({
+            "segments_total": len(tasks),
+            "segments_done": _count_valid_segments(segments_dir),
+        })
+
+    pending_tasks = []
+    for t in tasks:
+        seg_path = segments_dir / f"seg_{t.index:03d}.mp4"
+        if seg_path.is_file() and seg_path.stat().st_size > 1024:
+            cb(f"使用缓存片段 {t.index + 1}/{len(tasks)}")
+        else:
+            pending_tasks.append(t)
+
+    if cancel_event and cancel_event.is_set():
+        raise CancellationError("用户取消了任务")
+
+    _meta_lock = threading.Lock()
+
+    def run_one(t: WanClipTask) -> None:
+        if cancel_event and cancel_event.is_set():
+            raise CancellationError("用户取消了任务")
+        cb(f"IP 生成第 {t.index+1}/{len(tasks)} 段（约 {t.duration}s，{t.chunk_size} 镜）")
+        url = generate_video_clip(
+            t.prompt,
+            t.duration,
+            settings,
+            size=size,
+            poll_callback=None,
+            reference_urls=t.reference_urls or None,
+        )
+        seg_path = segments_dir / f"seg_{t.index:03d}.mp4"
+        download_url(url, seg_path)
+        with _meta_lock:
+            if meta_update:
+                meta_update({"segments_done": _count_valid_segments(segments_dir)})
+        cb(f"第 {t.index + 1} 段已保存")
+
+    if pending_tasks:
+        effective_workers = max(1, min(max_workers, len(pending_tasks)))
+        if len(pending_tasks) > 1:
+            cb(f"并发生成 {len(pending_tasks)} 个片段（并发数 {effective_workers}）…")
+        with ThreadPoolExecutor(max_workers=effective_workers) as ex:
+            futs = [ex.submit(run_one, t) for t in pending_tasks]
+            for fut in as_completed(futs):
+                fut.result()
+
+    paths = sorted(segments_dir.glob("seg_*.mp4"))
+    valid_paths = [p for p in paths if p.stat().st_size > 1024]
+    if len(valid_paths) != len(tasks):
+        raise RuntimeError(
+            f"片段数量不一致：期望 {len(tasks)}，实际 {len(valid_paths)}"
+        )
+
+    cb("正在拼接最终视频…")
+    try:
+        concat_videos_ffmpeg(valid_paths, output_mp4)
+    except subprocess.CalledProcessError:
+        reencode_concat(valid_paths, output_mp4)
+    cb(f"完成：{output_mp4.name}")
+    return output_mp4
