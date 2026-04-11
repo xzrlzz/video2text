@@ -11,7 +11,7 @@ from pathlib import Path
 
 import click
 
-from video2text.config.settings import load_generation_extras, load_settings
+from video2text.config.settings import load_settings
 from video2text.core.analyzer import (
     analyze_full_video_local,
     analyze_full_video_url,
@@ -377,24 +377,21 @@ def cmd_generate(
         )
     cfg_path = _resolve_config_path(ctx)
     settings = load_settings(cfg_path)
-    extras = load_generation_extras(cfg_path)
     max_seg = (
         float(max_segment_seconds)
         if max_segment_seconds is not None
-        else extras.max_segment_seconds
+        else settings.max_segment_seconds
     )
     subjects_merged = _merge_generation_subjects(
-        extras.subject_descriptions, subjects_file, subject
+        (), subjects_file, subject
     )
     ref_urls_merged = _merge_reference_urls(
-        extras.reference_urls, reference_url, reference_image
+        (), reference_url, reference_image
     )
     ref_videos_merged = _merge_reference_videos(
-        extras.reference_video_urls, reference_video
+        (), reference_video
     )
-    ref_desc_merged = list(extras.reference_video_descriptions) + list(
-        reference_video_desc
-    )
+    ref_desc_merged = list(reference_video_desc)
     if ref_videos_merged and ref_desc_merged and len(ref_videos_merged) != len(
         ref_desc_merged
     ):
@@ -416,7 +413,7 @@ def cmd_generate(
         need_ref = False
     else:
         allow_text_only_without_refs = (
-            no_require_reference and not extras.require_reference
+            no_require_reference and not settings.require_reference
         )
         need_ref = (not allow_text_only_without_refs) or require_reference
     if need_ref and not has_refs:
@@ -479,7 +476,7 @@ def cmd_generate(
 
     if has_refs:
         if (
-            extras.per_chunk_reference_filter
+            settings.per_chunk_reference_filter
             and len(ref_videos_merged) + len(ref_urls_merged) > 1
         ):
             click.echo(
@@ -514,7 +511,7 @@ def cmd_generate(
         reference_urls=ref_urls_merged,
         reference_video_urls=ref_videos_merged,
         reference_video_descriptions=ref_desc_merged,
-        per_chunk_reference_filter=extras.per_chunk_reference_filter,
+        per_chunk_reference_filter=settings.per_chunk_reference_filter,
         character_pool=char_pool,
         progress_callback=_cb,
         checkpoint_dir=None,

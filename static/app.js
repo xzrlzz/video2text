@@ -1720,8 +1720,12 @@
       set('thresh', c.scene_detect_threshold);
       set('fps', c.analysis_fps);
       set('maxseg', c.max_segment_seconds);
+      set('img-model', c.image_gen_model);
+      set('img-size', c.image_gen_size);
       set('ttl', c.task_ttl_days ?? 7);
       $('#cfg-key').value = c.dashscope_api_key || '';
+      const imgThink = $('#cfg-img-thinking');
+      if (imgThink) imgThink.checked = c.image_gen_thinking_mode !== false;
       $('#cfg-req-ref').checked = !!c.require_reference;
       const crf = $('#cfg-chunk-ref-filter');
       if (crf) crf.checked = c.per_chunk_reference_filter !== false;
@@ -1747,10 +1751,14 @@
         video_gen_model: $('#cfg-gen').value.trim(),
         video_ref_model: $('#cfg-ref').value.trim(),
         default_resolution: $('#cfg-res').value.trim(),
-        max_video_base64_mb: parseFloat($('#cfg-b64').value) || 7,
+        max_video_base64_mb: parseFloat($('#cfg-b64').value) || 9,
         scene_detect_threshold: parseFloat($('#cfg-thresh').value) || 27,
         analysis_fps: parseFloat($('#cfg-fps').value) || 2,
         max_segment_seconds: parseFloat($('#cfg-maxseg').value) || 15,
+        image_gen_model: ($('#cfg-img-model') || {}).value ? $('#cfg-img-model').value.trim() : 'wan2.7-image-pro',
+        image_gen_thinking_mode: $('#cfg-img-thinking') ? $('#cfg-img-thinking').checked : true,
+        image_gen_size: ($('#cfg-img-size') || {}).value ? $('#cfg-img-size').value.trim() : '2K',
+        task_ttl_days: parseInt($('#cfg-ttl').value) || 7,
         require_reference: $('#cfg-req-ref').checked,
         per_chunk_reference_filter: $('#cfg-chunk-ref-filter').checked,
       };
@@ -2050,7 +2058,7 @@
       const el = $('#disk-usage-info');
       el.textContent = '加载中...';
       try {
-        const data = await apiFetch('/api/admin/disk-usage');
+        const data = await api('/api/admin/disk-usage');
         if (!data.length) { el.textContent = '暂无数据'; return; }
         el.innerHTML = data.map(u =>
           `<div>${escapeHtml(u.user)}: ${u.tasks} 个任务, ${u.mb} MB</div>`
@@ -2063,7 +2071,7 @@
       const el = $('#cleanup-result');
       el.textContent = '预览中...';
       try {
-        const data = await apiFetch('/api/admin/cleanup', {
+        const data = await api('/api/admin/cleanup', {
           method: 'POST', json: true, body: { dry_run: true },
         });
         if (!data.deleted.length) {
@@ -2081,7 +2089,7 @@
       const el = $('#cleanup-result');
       el.textContent = '清理中...';
       try {
-        const data = await apiFetch('/api/admin/cleanup', {
+        const data = await api('/api/admin/cleanup', {
           method: 'POST', json: true, body: { dry_run: false },
         });
         el.textContent = `已删除 ${data.deleted.length} 个任务，释放 ${data.freed_mb} MB`;

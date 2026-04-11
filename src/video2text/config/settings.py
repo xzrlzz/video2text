@@ -45,19 +45,17 @@ def _as_float(v: Any, default: float, lo: float | None = None, hi: float | None 
 
 @dataclass(frozen=True)
 class GenerationExtras:
-    """视频生成阶段默认：主体描述与万相参考素材（可被 CLI 覆盖/追加）。"""
+    """任务级参数：主体描述与万相参考素材（仅从 CLI 参数或任务文件加载）。"""
 
     subject_descriptions: tuple[str, ...] = ()
     reference_urls: tuple[str, ...] = ()
     reference_video_urls: tuple[str, ...] = ()
     reference_video_descriptions: tuple[str, ...] = ()
-    max_segment_seconds: float = 15.0
-    require_reference: bool = True
-    per_chunk_reference_filter: bool = True
 
 
-def load_generation_extras(config_path: str | Path | None = None) -> GenerationExtras:
-    cfg = load_config_file(config_path)
+def load_generation_extras(data: dict[str, Any] | None = None) -> GenerationExtras:
+    """从 dict 加载任务级生成参数。不再从全局 config.json 读取。"""
+    cfg = data or {}
     subjects = cfg.get("subject_descriptions") or cfg.get("subjects")
     ref_u = cfg.get("reference_urls") or cfg.get("reference_image_urls")
     return GenerationExtras(
@@ -65,9 +63,6 @@ def load_generation_extras(config_path: str | Path | None = None) -> GenerationE
         reference_urls=_as_str_tuple(ref_u),
         reference_video_urls=_as_str_tuple(cfg.get("reference_video_urls")),
         reference_video_descriptions=_as_str_tuple(cfg.get("reference_video_descriptions")),
-        max_segment_seconds=_as_float(cfg.get("max_segment_seconds"), 15.0, lo=2.0, hi=15.0),
-        require_reference=_as_bool(cfg.get("require_reference"), True),
-        per_chunk_reference_filter=_as_bool(cfg.get("per_chunk_reference_filter"), True),
     )
 
 
@@ -78,15 +73,25 @@ class Settings:
     dashscope_api_base: str = "https://dashscope.aliyuncs.com/api/v1"
     vision_model: str = "qwen3.6-plus"
     theme_story_model: str = ""
+    theme_idea_model: str = ""
     video_gen_model: str = "wan2.7-t2v"
     video_ref_model: str = "wan2.7-r2v"
     default_resolution: str = "720*1280"
     image_gen_model: str = "wan2.7-image-pro"
     image_gen_thinking_mode: bool = True
     image_gen_size: str = "2K"
-    max_video_base64_mb: float = 7.0
+    max_video_base64_mb: float = 9.0
     scene_detect_threshold: float = 27.0
     analysis_fps: float = 2.0
+    max_segment_seconds: float = 15.0
+    require_reference: bool = True
+    per_chunk_reference_filter: bool = True
+    task_ttl_days: int = 7
+
+
+SETTINGS_FIELDS: frozenset[str] = frozenset(
+    f.name for f in __import__("dataclasses").fields(Settings)
+)
 
 
 def _default_config_search_paths() -> list[Path]:
@@ -94,7 +99,6 @@ def _default_config_search_paths() -> list[Path]:
     env = os.getenv("V2T_CONFIG", "").strip()
     if env:
         paths.append(Path(env).expanduser())
-    paths.append(Path.cwd() / "config.json")
     paths.append(get_project_root() / "config.json")
     paths.append(get_data_config_dir() / "config.json")
     return paths
@@ -143,12 +147,8 @@ def _env_or_file(
     return default
 
 
-def load_settings(config_path: str | Path | None = None) -> Settings:
-    """
-    加载设置。密钥与端点可从 config.json 读取；同名环境变量始终覆盖配置文件。
-    """
-    file_cfg = load_config_file(config_path)
-
+def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
+    """从 dict 构造 Settings，环境变量仍可覆盖。"""
     key = _env_or_file("DASHSCOPE_API_KEY", file_cfg, "dashscope_api_key", "")
     if isinstance(key, str):
         key = key.strip()
@@ -180,6 +180,11 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             "V2T_THEME_MODEL", file_cfg, "theme_story_model", Settings.theme_story_model
         )
     ).strip()
+    theme_idea = str(
+        _env_or_file(
+            "V2T_THEME_IDEA_MODEL", file_cfg, "theme_idea_model", Settings.theme_idea_model
+        )
+    ).strip()
     gen = str(
         _env_or_file("V2T_GEN_MODEL", file_cfg, "video_gen_model", Settings.video_gen_model)
     )
@@ -208,12 +213,30 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     )
 
     max_b64 = _env_or_file(
-        "V2T_MAX_VIDEO_BASE64_MB", file_cfg, "max_video_base64_mb", 9.0
+        "V2T_MAX_VIDEO_BASE64_MB", file_cfg, "max_video_base64_mb",
+        Settings.max_video_base64_mb,
     )
     threshold = _env_or_file(
         "V2T_SCENE_THRESHOLD", file_cfg, "scene_detect_threshold", 27.0
     )
     fps = _env_or_file("V2T_ANALYSIS_FPS", file_cfg, "analysis_fps", 2.0)
+    max_seg = _env_or_file(
+        "V2T_MAX_SEGMENT_SECONDS", file_cfg, "max_segment_seconds",
+        Settings.max_segment_seconds,
+    )
+    req_ref = _as_bool(
+        _env_or_file("V2T_REQUIRE_REFERENCE", file_cfg, "require_reference", None),
+        default=Settings.require_reference,
+    )
+    chunk_filter = _as_bool(
+        _env_or_file(
+            "V2T_PER_CHUNK_REF_FILTER", file_cfg, "per_chunk_reference_filter", None
+        ),
+        default=Settings.per_chunk_reference_filter,
+    )
+    ttl = _env_or_file(
+        "V2T_TASK_TTL_DAYS", file_cfg, "task_ttl_days", Settings.task_ttl_days
+    )
 
     return Settings(
         dashscope_api_key=key,
@@ -221,6 +244,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         dashscope_api_base=api_base,
         vision_model=vision,
         theme_story_model=theme_story,
+        theme_idea_model=theme_idea,
         video_gen_model=gen,
         video_ref_model=ref_gen,
         default_resolution=resolution,
@@ -230,4 +254,20 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         max_video_base64_mb=float(max_b64),
         scene_detect_threshold=float(threshold),
         analysis_fps=float(fps),
+        max_segment_seconds=_as_float(max_seg, Settings.max_segment_seconds, lo=2.0, hi=15.0),
+        require_reference=req_ref,
+        per_chunk_reference_filter=chunk_filter,
+        task_ttl_days=int(ttl) if ttl is not None else Settings.task_ttl_days,
     )
+
+
+def load_settings(config_path: str | Path | None = None) -> Settings:
+    """
+    加载设置。密钥与端点可从 config.json 读取；同名环境变量始终覆盖配置文件。
+    """
+    return _build_settings_from_dict(load_config_file(config_path))
+
+
+def load_settings_from_dict(cfg: dict[str, Any]) -> Settings:
+    """从已合并的 dict 构造 Settings（不读文件），供 Web 层在内存合并后调用。"""
+    return _build_settings_from_dict(cfg)

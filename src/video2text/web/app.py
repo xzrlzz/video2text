@@ -20,9 +20,13 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 from openai import OpenAI
 
-from video2text.config.settings import load_generation_extras, load_settings
+from video2text.config.settings import (
+    SETTINGS_FIELDS,
+    GenerationExtras,
+    load_settings,
+    load_settings_from_dict,
+)
 from video2text.utils.paths import (
-    get_config_example_path,
     get_default_config_path,
     get_static_dir,
     get_user_config_path,
@@ -52,10 +56,7 @@ from video2text.web.auth import get_current_user, init_auth, is_current_user_adm
 WORKSPACE = get_workspace_dir()
 STATIC = get_static_dir()
 CONFIG_PATH = get_default_config_path()
-CONFIG_EXAMPLE = get_config_example_path()
 
-# 任务自动清理：超过 N 天未更新的任务目录将在下次启动时清理
-TASK_TTL_DAYS = 2
 _CLEANUP_INTERVAL_SEC = 6 * 3600  # 6 hours
 
 _RUNNING_STATUSES = frozenset({"running", "pending", "analyzing", "generating", "consolidating"})
@@ -192,11 +193,9 @@ def _mask_key(key: str) -> str:
 
 
 def _get_global_config() -> dict[str, Any]:
-    """读取全局配置（作为用户配置的 fallback 默认值）。"""
+    """读取全局配置。"""
     if CONFIG_PATH.is_file():
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    if CONFIG_EXAMPLE.is_file():
-        return json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
     return {}
 
 
@@ -225,27 +224,13 @@ def _get_config_for_api(username: str | None = None) -> dict[str, Any]:
     return base
 
 
-def _get_user_config_path_for_settings(username: str) -> str:
-    """返回用户配置文件的路径字符串（供 load_settings 使用）。
-    合并全局配置与用户覆盖项，写入用户配置路径后返回。
-    如果用户无独立配置则回退全局配置。"""
-    user_path = get_user_config_path(username)
-    user_cfg = _get_user_config(username)
-    if not user_cfg:
-        return str(CONFIG_PATH)
+def _load_settings_for_user(username: str):
+    """在内存中合并全局 + 用户配置并构造 Settings，不写盘。"""
     merged = _get_global_config()
-    merged.update(user_cfg)
-    user_path.parent.mkdir(parents=True, exist_ok=True)
-    user_path.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return str(user_path)
-
-
-def _save_config_file(data: dict[str, Any]) -> None:
-    CONFIG_PATH.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    user_cfg = _get_user_config(username)
+    if user_cfg:
+        merged.update(user_cfg)
+    return load_settings_from_dict(merged)
 
 
 def _task_last_modified(task_dir: Path) -> datetime | None:
@@ -290,9 +275,9 @@ def _is_task_running(task_id: str) -> bool:
     return False
 
 
-def _cleanup_old_tasks(dry_run: bool = False) -> dict[str, Any]:
-    """清理超过 TASK_TTL_DAYS 天未更新的任务目录（保护运行中的任务）。"""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=TASK_TTL_DAYS)
+def _cleanup_old_tasks(dry_run: bool = False, ttl_days: int = 7) -> dict[str, Any]:
+    """清理超过 ttl_days 天未更新的任务目录（保护运行中的任务）。"""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=ttl_days)
     result: dict[str, Any] = {"deleted": [], "skipped_running": [], "freed_bytes": 0}
     if not WORKSPACE.is_dir():
         return result
@@ -345,12 +330,19 @@ def api_config_post():
     cur = _get_user_config(username)
     if not cur:
         cur = dict(_get_global_config())
+    ignored: list[str] = []
     for k, v in body.items():
         if k == "dashscope_api_key" and (v is None or str(v).strip() == ""):
             continue
+        if k not in SETTINGS_FIELDS:
+            ignored.append(k)
+            continue
         cur[k] = v
     _save_user_config(username, cur)
-    return jsonify({"ok": True})
+    resp: dict[str, Any] = {"ok": True}
+    if ignored:
+        resp["ignored_fields"] = ignored
+    return jsonify(resp)
 
 
 # ---------------------------------------------------------------------------
@@ -473,8 +465,7 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
         _write_task_meta(task_id, {"status": "theme_running", "type": "theme"})
         _sse_push(task_id, {"type": "status", "status": "theme_running"})
         log("Storyboard generation started, loading config…")
-        cfg_path = _get_user_config_path_for_settings(owner) if owner else str(CONFIG_PATH)
-        settings = load_settings(cfg_path)
+        settings = _load_settings_for_user(owner) if owner else load_settings(str(CONFIG_PATH))
         theme = (params.get("theme") or "").strip()
         if not theme:
             raise ValueError("主题为空")
@@ -538,8 +529,7 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
         _write_task_meta(task_id, {"status": "analyze_running", "type": "analyze"})
         _sse_push(task_id, {"type": "status", "status": "analyze_running"})
         log("Video analysis started, loading config…")
-        cfg_path = _get_user_config_path_for_settings(owner) if owner else str(CONFIG_PATH)
-        settings = load_settings(cfg_path)
+        settings = _load_settings_for_user(owner) if owner else load_settings(str(CONFIG_PATH))
         td = _task_dir(task_id)
         consolidate_flag = not params.get("skip_consolidate")
         style = str(params.get("style") or "")
@@ -644,9 +634,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
 
         _write_task_meta(task_id, {"status": "generating"})
         _sse_push(task_id, {"type": "status", "status": "generating"})
-        cfg_path = _get_user_config_path_for_settings(owner) if owner else str(CONFIG_PATH)
-        settings = load_settings(cfg_path)
-        extras = load_generation_extras(cfg_path)
+        settings = _load_settings_for_user(owner) if owner else load_settings(str(CONFIG_PATH))
 
         doc = StoryboardDocument.load_json(sb)
         text_only = bool(params.get("text_only_video"))
@@ -666,7 +654,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             if char_pool:
                 log(f"角色池已解析：{', '.join(e.name for e in char_pool)}（共 {len(char_pool)} 个角色）")
         else:
-            if not ref_images and not ref_videos and extras.require_reference:
+            if not ref_images and not ref_videos and settings.require_reference:
                 raise ValueError(
                     "参考生需要上传参考图或视频，或勾选「纯文生（无参考）」"
                 )
@@ -675,7 +663,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             raise ValueError("参考视频数量与视频说明数量须一致")
 
         max_seg = float(
-            params.get("max_segment_seconds") or extras.max_segment_seconds
+            params.get("max_segment_seconds") or settings.max_segment_seconds
         )
         # 优先用参数里的 style，其次用任务元数据里已保存的统一风格
         meta_style = str(_read_task_meta(task_id).get("style") or "")
@@ -719,7 +707,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             reference_urls=ref_images,
             reference_video_urls=ref_videos,
             reference_video_descriptions=ref_video_descs,
-            per_chunk_reference_filter=extras.per_chunk_reference_filter,
+            per_chunk_reference_filter=settings.per_chunk_reference_filter,
             character_pool=char_pool,
             progress_callback=log,
             checkpoint_dir=td / "segments",
@@ -828,12 +816,9 @@ def api_task_theme_generate_idea():
     body = request.get_json(force=True, silent=True) or {}
     style_hint = (body.get("style") or "").strip()
     try:
-        cfg_path = _get_user_config_path_for_settings(username)
-        settings = load_settings(cfg_path)
-        cfg = _get_config_for_api(username)
-        # 优先用专门配置的 theme_idea_model，否则回退到 theme_story_model / vision_model
+        settings = _load_settings_for_user(username)
         use_model = (
-            cfg.get("theme_idea_model", "").strip()
+            settings.theme_idea_model
             or settings.theme_story_model
             or settings.vision_model
             or ""
@@ -877,8 +862,7 @@ def api_task_theme_next():
     sb_path = td / "storyboard.json"
 
     try:
-        cfg_path = _get_user_config_path_for_settings(username)
-        settings = load_settings(cfg_path)
+        settings = _load_settings_for_user(username)
         theme = str(body.get("theme") or "")
         style = str(body.get("style") or "")
         model = body.get("model") or None
@@ -1269,8 +1253,7 @@ def api_translate():
     if not text:
         return jsonify({"result": ""})
     try:
-        cfg_path = _get_user_config_path_for_settings(username)
-        settings = load_settings(cfg_path)
+        settings = _load_settings_for_user(username)
         client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
         use_model = (settings.theme_story_model or settings.vision_model or "").strip()
         if target == "zh":
@@ -1503,7 +1486,7 @@ def api_admin_cleanup():
     if not is_current_user_admin():
         return jsonify({"error": "需要管理员权限"}), 403
     dry_run = request.json.get("dry_run", False) if request.is_json else False
-    result = _cleanup_old_tasks(dry_run=dry_run)
+    result = _cleanup_old_tasks(dry_run=dry_run, ttl_days=_get_task_ttl_days())
     result["freed_mb"] = round(result["freed_bytes"] / (1024 * 1024), 1)
     return jsonify(result)
 
@@ -1576,8 +1559,7 @@ def api_create_ip():
     style_preset_id = data.get("style_preset_id", "")
 
     try:
-        cfg_path = _get_user_config_path_for_settings(user)
-        settings = load_settings(cfg_path)
+        settings = _load_settings_for_user(user)
         proposal = generate_ip_proposal(
             seed, settings, style_preset_id=style_preset_id,
         )
@@ -1600,8 +1582,7 @@ def api_confirm_ip():
         profile = create_ip_from_proposal(proposal, user)
 
         if generate_images:
-            cfg_path = _get_user_config_path_for_settings(user)
-            settings = load_settings(cfg_path)
+            settings = _load_settings_for_user(user)
             profile = generate_character_images(profile, user, settings)
 
         return jsonify({"ip": profile.to_dict()})
@@ -1645,8 +1626,7 @@ def api_regenerate_character_image(ip_id: str, char_id: str):
         return jsonify({"error": "角色不存在"}), 404
 
     try:
-        cfg_path = _get_user_config_path_for_settings(user)
-        settings = load_settings(cfg_path)
+        settings = _load_settings_for_user(user)
         ip = generate_character_images(ip, user, settings, char_ids=[char_id])
         return jsonify({"ip": ip.to_dict()})
     except Exception as e:
@@ -1749,8 +1729,7 @@ def api_task_ip_theme():
             _update_task_meta(task_dir, {"status": "generating_storyboard"})
             _sse_push(task_id, "正在生成 IP 分镜…")
 
-            cfg_path = _get_user_config_path_for_settings(user)
-            settings = load_settings(cfg_path)
+            settings = _load_settings_for_user(user)
             doc = generate_storyboard_from_ip(
                 ip, settings,
                 theme_hint=theme_hint,
@@ -1852,7 +1831,7 @@ def _start_cleanup_timer() -> None:
         while True:
             time.sleep(_CLEANUP_INTERVAL_SEC)
             try:
-                result = _cleanup_old_tasks()
+                result = _cleanup_old_tasks(ttl_days=_get_task_ttl_days())
                 if result["deleted"]:
                     freed_mb = round(result["freed_bytes"] / (1024 * 1024), 1)
                     print(f"[cleanup] 定时清理：删除 {len(result['deleted'])} 个过期任务，释放 {freed_mb} MB")
@@ -1863,13 +1842,23 @@ def _start_cleanup_timer() -> None:
     t.start()
 
 
+def _get_task_ttl_days() -> int:
+    """从全局配置读取 task_ttl_days，避免在启动时依赖完整 Settings（可能缺 API Key）。"""
+    cfg = _get_global_config()
+    try:
+        return int(cfg.get("task_ttl_days", 7))
+    except (TypeError, ValueError):
+        return 7
+
+
 def main() -> None:
     _ensure_workspace()
     _migrate_legacy_tasks()
-    result = _cleanup_old_tasks()
+    ttl = _get_task_ttl_days()
+    result = _cleanup_old_tasks(ttl_days=ttl)
     if result["deleted"]:
         freed_mb = round(result["freed_bytes"] / (1024 * 1024), 1)
-        print(f"[startup] 清理 {len(result['deleted'])} 个过期任务（>{TASK_TTL_DAYS} 天），释放 {freed_mb} MB")
+        print(f"[startup] 清理 {len(result['deleted'])} 个过期任务（>{ttl} 天），释放 {freed_mb} MB")
     _start_cleanup_timer()
     import socket
     local_ip = "127.0.0.1"

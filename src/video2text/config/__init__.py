@@ -1,9 +1,11 @@
 from video2text.config.settings import (
+    SETTINGS_FIELDS,
     GenerationExtras,
     Settings,
     load_config_file,
     load_generation_extras,
     load_settings,
+    load_settings_from_dict,
 )
 from video2text.utils.paths import (
     get_config_example_path,
@@ -19,6 +21,7 @@ from video2text.utils.paths import (
 
 __all__ = [
     "GenerationExtras",
+    "SETTINGS_FIELDS",
     "Settings",
     "get_config_example_path",
     "get_data_config_dir",
@@ -32,4 +35,5 @@ __all__ = [
     "load_config_file",
     "load_generation_extras",
     "load_settings",
+    "load_settings_from_dict",
 ]

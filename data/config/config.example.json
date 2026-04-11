@@ -8,17 +8,14 @@
   "video_gen_model": "wan2.7-t2v",
   "video_ref_model": "wan2.7-r2v",
   "default_resolution": "720*1280",
-  "max_video_base64_mb": 9.0,
-  "scene_detect_threshold": 27.0,
-  "analysis_fps": 2.0,
   "image_gen_model": "wan2.7-image-pro",
   "image_gen_thinking_mode": true,
   "image_gen_size": "2K",
-  "subject_descriptions": [],
-  "reference_urls": [],
-  "reference_video_urls": [],
-  "reference_video_descriptions": [],
+  "max_video_base64_mb": 9.0,
+  "scene_detect_threshold": 27.0,
+  "analysis_fps": 2.0,
   "max_segment_seconds": 15,
   "require_reference": true,
-  "per_chunk_reference_filter": true
+  "per_chunk_reference_filter": true,
+  "task_ttl_days": 7
 }
