@@ -183,7 +183,7 @@ def submit_wan27_r2v(
     if not media:
         raise ValueError("wan2.7-r2v 需要至少 1 个参考图或参考视频")
 
-    resolution, _ratio = parse_size_to_wan27_resolution_and_ratio(
+    resolution, ratio = parse_size_to_wan27_resolution_and_ratio(
         size or settings.default_resolution
     )
     d = max(2, min(10, int(duration)))
@@ -192,6 +192,7 @@ def submit_wan27_r2v(
         "input": {"prompt": prompt, "media": media},
         "parameters": {
             "resolution": resolution,
+            "ratio": ratio,
             "duration": d,
             "prompt_extend": prompt_extend,
             "watermark": watermark,

@@ -93,7 +93,8 @@ Rules:
 - Analyze the **entire reference video** by default: global_summary must reflect the overall mood, color, and editing rhythm; shots must cover ALL cuts in chronological order. Do NOT skip shots or merge multiple cuts into one entry.
 - If the input is a short clip, still provide a reasonable global_summary and per-shot descriptions.
 - Each distinct cut gets its own entry in shots; duration_sec is the shot duration in seconds (positive, estimate if unsure).
-- ALL text fields must be written in English. No non-English characters in any field."""
+- ALL text fields must be written in English. ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters in any field.
+- ALL dialogue MUST be translated to English. If the original speech is in Chinese or any other non-English language, you MUST translate it to natural, fluent English while preserving meaning and tone. The dialogue field must NEVER contain non-English text."""
 
 
 USER_ANALYSIS_PROMPT = """Analyze the uploaded reference video. You are a director breaking down footage to understand its narrative and cinematic construction.
@@ -140,7 +141,8 @@ Fill in the JSON fields defined in the system prompt:
    - generation_prompt: PURE ENGLISH. Single paragraph. Must include: shot scale/angle/movement, spatial context from scene_geography, subject blocking and screen direction, motivated action with performance details, lighting with source, cinematic style. NO appearance/outfit details.
    - duration_sec: Estimated shot duration in seconds
 
-Output JSON only. ALL fields must be in English. No non-English characters anywhere.
+Output JSON only. ALL fields must be in English. ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere.
+ALL dialogue MUST be in English — if the original speech is in any non-English language, translate it to natural English.
 
 If the reference video has ambiguous spatial or narrative connections, use your directorial judgment to INFER the most logical relationships. Make the sequence make sense."""
 
@@ -180,7 +182,8 @@ CONSOLIDATION GUIDELINES:
 - "characters" field: Infer names from dialogue attribution if available. If unnamed, use roles like "WOMAN", "MAN", "FIGURE". Focus on what their performance reveals about their inner world.
 - "pacing_flow": Use the editing_pace from global_summary and the cut_rhythm / continuity_note patterns from shots to describe the viewing experience. Was it breathless? Meditative? Uneasy?
 - "scene_geography": This is for human reading. Make it vivid. Use details from the scene_description fields across shots to paint a unified picture of the location.
-- ALL fields must be written in English. No non-English characters anywhere.
+- ALL fields must be written in English. ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere.
+- ALL dialogue references in synopsis, key_moments, or any other field MUST be in English.
 
 GENERATION PROMPT REWRITING RULES (CRITICAL):
 The "refined_generation_prompts" array must contain a rewritten generation_prompt for EVERY shot. Each rewritten prompt must:
@@ -771,12 +774,15 @@ def _full_video_user_text(style_hint: str) -> str:
         f"{USER_ANALYSIS_PROMPT}\n"
         "请完整观看整支参考视频。\n"
         "【最高优先级】仔细听取音频轨道中的所有对话内容，逐句转录到每个镜头的 dialogue 字段中。"
-        "如果原片语言非英语，请翻译为英文，保留原意和语气，可以略作修辞润色但核心意思不能变。"
+        "【绝对要求】所有 dialogue 必须是英文！如果原片语言是中文或其他非英语语言，"
+        "必须翻译为自然流畅的英文，保留原意和语气，可以略作修辞润色但核心意思不能变。"
+        "禁止在 dialogue 字段中出现任何中文或其他非英文字符！"
         "角色嘴唇在动就一定有对白，不可留空。\n"
         "除 global_summary 与 shots 外，每个镜头尽量给出在原片时间轴上的 "
         "approx_start_sec 与 approx_end_sec（浮点秒，从 0 起算）。若无法精确，可用 duration_sec "
         "表示该镜时长并由系统推算。\n"
         "角色动作描述必须包含微表情和肢体语言细节。\n"
+        "【重要提醒】JSON 中所有文本字段必须为英文，不允许出现任何中文字符。dialogue 字段尤其重要，必须是英文。\n"
         "只输出 JSON。"
         f"{hint}"
     )

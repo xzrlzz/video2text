@@ -699,6 +699,8 @@ def build_wan_multi_shot_prompt(
         combined_neg = ", ".join(dict.fromkeys(neg_hints))
         prompt += f" Avoid unwanted elements: {combined_neg}."
 
+    prompt += " All dialogue and spoken lines must be in English."
+
     return prompt, target
 
 

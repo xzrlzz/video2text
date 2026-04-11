@@ -27,7 +27,13 @@ STORY_ARCHITECT_SYSTEM = """You are an expert film screenwriter. Your sole task 
 
 CRITICAL PRINCIPLE: Every narrative beat must be FILMABLE — only things a camera can see and a microphone can hear. "She feels sad" is WRONG. "She is sitting alone at a table, slowly pushing food around her plate, her eyes red-rimmed" is CORRECT.
 
-Output **strict JSON only** (no Markdown code blocks, no preamble). ALL fields in ENGLISH.
+Output **strict JSON only** (no Markdown code blocks, no preamble). ALL fields in ENGLISH — this is NON-NEGOTIABLE.
+
+LANGUAGE RULE (ABSOLUTE — ZERO EXCEPTIONS):
+- Every single text field in the JSON MUST be written in English. No Chinese, Japanese, Korean, or ANY non-English characters allowed anywhere.
+- ALL dialogue MUST be in English. Even if the theme/brief is given in Chinese, the dialogue you write MUST be in English.
+- Characters MUST speak English. Write natural, fluent English dialogue.
+- If the story is set in a non-English-speaking location, characters still speak English (like a dubbed film).
 
 {
   "title": "Evocative working title reflecting the core theme",
@@ -83,7 +89,8 @@ SHOT_DESIGNER_SYSTEM = """You are a professional storyboard director and AI vide
 
 STRICT REQUIREMENTS:
 - Output **strict JSON only** (no Markdown code blocks, no preamble or postamble).
-- ALL text fields must be in ENGLISH.
+- ALL text fields must be in ENGLISH — ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere in the JSON.
+- ALL dialogue MUST be in English. Characters MUST speak English regardless of the story setting or theme language.
 - Do NOT change the story, characters, or dialogue from the outline. Faithfully translate each narrative beat into 1-3 shots.
 
 JSON SCHEMA:
@@ -154,7 +161,8 @@ THEME_STORYBOARD_SYSTEM = """You are a professional film screenwriter and storyb
 
 STRICT REQUIREMENTS:
 - Output **strict JSON only** (no Markdown code blocks, no preamble or postamble).
-- ALL text fields in the JSON must be written in ENGLISH. No Chinese or other non-English characters anywhere.
+- ALL text fields in the JSON must be written in ENGLISH. ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere.
+- ALL dialogue lines MUST be in English. Even if the user's theme is in Chinese, ALL character speech MUST be natural, fluent English. Characters always speak English like a dubbed film.
 - Root object field names must match exactly as defined in the schema below.
 
 JSON SCHEMA STRUCTURE:
@@ -244,9 +252,11 @@ DIALOGUE FORMAT:
 - Use exact character names from the characters list.
 - Empty string "" for shots with no spoken words.
 
-LANGUAGE ENFORCEMENT:
-- ALL JSON text fields must be ENGLISH.
+LANGUAGE ENFORCEMENT (ABSOLUTE — ZERO EXCEPTIONS):
+- ALL JSON text fields must be ENGLISH. No Chinese, Japanese, Korean, or ANY non-English characters allowed.
+- ALL dialogue MUST be in English. Characters MUST speak English. Even if the user's theme/brief is in Chinese, you MUST write all dialogue in natural, fluent English. Treat it like dubbing a film into English.
 - If the story setting requires non-English environmental text (e.g., a street sign in Chinese), describe it in English within scene_description: "A neon sign with Chinese characters glowing red."
+- VALIDATION: Before outputting, scan every "dialogue" field — if ANY contains non-English characters, rewrite it in English.
 
 PACING AND TENSION BUILDING (SHORT-FORM — EVERY SECOND COUNTS):
 - DEFAULT: Most shots are ~2 seconds. Only add time for dialogue delivery.
@@ -261,7 +271,8 @@ NEXT_SHOT_SYSTEM = """You are a professional film screenwriter and storyboard di
 
 STRICT REQUIREMENTS:
 - Output **strict JSON only** (no Markdown code blocks, no preamble or postamble).
-- ALL text fields must be in ENGLISH. No Chinese or other non-English characters anywhere.
+- ALL text fields must be in ENGLISH. ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere.
+- ALL dialogue MUST be in English. Characters MUST speak English regardless of the story's setting or the language of previous context. Write natural, fluent English dialogue.
 - Output a single shot object with the following fields:
 
 {
@@ -347,7 +358,7 @@ def _generate_story_outline(
         f"The final storyboard will have {min_shots}–{max_shots} shots, "
         f"so provide roughly {max(3, min_shots * 2 // 3)}–{max_shots} narrative beats.\n"
         f"Each beat should be filmable in 2-5 seconds of screen time (short-form video pacing).{extra}\n"
-        f"Output JSON only. All text fields must be in English."
+        f"Output JSON only. All text fields must be in English. ALL dialogue must be in English — no Chinese or other non-English text."
     )
     completion = client.chat.completions.create(
         model=model,
@@ -384,7 +395,7 @@ def _generate_shots_from_outline(
         f"what is happening in the STORY at this moment — the viewer should "
         f"understand the character's intention and emotional state from the "
         f"visual alone.{extra}\n"
-        f"Output JSON only. All text fields must be in English."
+        f"Output JSON only. All text fields must be in English. ALL dialogue must be in English — no Chinese or other non-English text."
     )
     completion = client.chat.completions.create(
         model=model,
@@ -517,7 +528,7 @@ def _single_pass_generate(
     user_msg = (
         f"Story theme / creative brief:\n{theme}\n\n"
         f"Generate {min_shots}–{max_shots} shots (shots array length must fall within this range)."
-        f"{extra}\nOutput JSON only. All text fields must be in English."
+        f"{extra}\nOutput JSON only. All text fields must be in English. ALL dialogue must be in English — no Chinese or other non-English text."
     )
     completion = client.chat.completions.create(
         model=model,
@@ -578,7 +589,7 @@ def generate_next_shot(
         context_lines.append(
             f"  Shot {i}: {' | '.join(p for p in parts if p)}"
         )
-    context_lines.append("\nWrite the next shot as a single JSON object. Output JSON only. All fields in English.")
+    context_lines.append("\nWrite the next shot as a single JSON object. Output JSON only. All fields in English. ALL dialogue MUST be in English — no Chinese or other non-English text.")
 
     user_msg = "\n".join(context_lines)
 
