@@ -27,13 +27,6 @@ log = logging.getLogger(__name__)
 
 _QUALITY_SUFFIX_ZH = "高清, 精致细节, 专业角色设计, 高品质渲染"
 
-_DEFAULT_NEGATIVE_PROMPT_ZH = (
-    "低分辨率, 模糊, 多余的手指, 畸形的手, 额外肢体, "
-    "解剖错误, 不对称, 文字, 水印, 画面过饱和, "
-    "蜡像感, 过度光滑, 背景杂乱, 多个角色"
-)
-
-
 def build_character_image_prompt(
     character: IPCharacter,
     visual_dna: VisualDNA,
@@ -91,7 +84,13 @@ def generate_image(
     else:
         url = _generate_wan_image(prompt, settings, model, size, thinking_mode)
 
-    dest = Path(save_to) if save_to else Path(tempfile.mktemp(suffix=".jpg", prefix="imggen_"))
+    if save_to:
+        dest = Path(save_to)
+    else:
+        fd, tmp = tempfile.mkstemp(suffix=".jpg", prefix="imggen_")
+        import os
+        os.close(fd)
+        dest = Path(tmp)
     _download_image(url, dest)
     log.info("Image saved to %s (model=%s)", dest, model)
     return dest

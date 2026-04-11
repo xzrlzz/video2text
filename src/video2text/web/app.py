@@ -172,7 +172,9 @@ def _append_progress(task_id: str, msg: str) -> None:
     _sse_push(task_id, {"type": "progress", "msg": msg, "t": _iso_now()})
 
 
-def _sse_push(task_id: str, event: dict[str, Any]) -> None:
+def _sse_push(task_id: str, event: dict[str, Any] | str) -> None:
+    if isinstance(event, str):
+        event = {"type": "progress", "msg": event, "t": _iso_now()}
     with _sse_lock:
         qs = _sse_queues.get(task_id, [])
         for q in qs:
@@ -1012,8 +1014,8 @@ def api_task_run():
                 _append_progress(tid, "run 需要 theme 或 video_path / video_url")
                 _write_task_meta(tid, {"status": "failed", "error": "缺少主题或视频"})
                 return
-            meta = _read_task_meta(tid)
-            if meta.get("status") != "storyboard_ready":
+            td = _task_dir(tid)
+            if not (td / "storyboard.json").is_file():
                 return
             gen_params = {
                 "text_only_video": p.get("text_only_video"),
@@ -1489,6 +1491,8 @@ def _workspace_disk_usage() -> list[dict[str, Any]]:
 def api_admin_disk_usage():
     """查看各用户工作区磁盘占用。"""
     _require_user()
+    if not is_current_user_admin():
+        return jsonify({"error": "需要管理员权限"}), 403
     return jsonify(_workspace_disk_usage())
 
 
@@ -1496,6 +1500,8 @@ def api_admin_disk_usage():
 def api_admin_cleanup():
     """手动触发缓存清理（支持 dry_run 预览）。"""
     _require_user()
+    if not is_current_user_admin():
+        return jsonify({"error": "需要管理员权限"}), 403
     dry_run = request.json.get("dry_run", False) if request.is_json else False
     result = _cleanup_old_tasks(dry_run=dry_run)
     result["freed_mb"] = round(result["freed_bytes"] / (1024 * 1024), 1)
@@ -1570,7 +1576,8 @@ def api_create_ip():
     style_preset_id = data.get("style_preset_id", "")
 
     try:
-        settings = load_settings()
+        cfg_path = _get_user_config_path_for_settings(user)
+        settings = load_settings(cfg_path)
         proposal = generate_ip_proposal(
             seed, settings, style_preset_id=style_preset_id,
         )
@@ -1593,7 +1600,8 @@ def api_confirm_ip():
         profile = create_ip_from_proposal(proposal, user)
 
         if generate_images:
-            settings = load_settings()
+            cfg_path = _get_user_config_path_for_settings(user)
+            settings = load_settings(cfg_path)
             profile = generate_character_images(profile, user, settings)
 
         return jsonify({"ip": profile.to_dict()})
@@ -1637,11 +1645,34 @@ def api_regenerate_character_image(ip_id: str, char_id: str):
         return jsonify({"error": "角色不存在"}), 404
 
     try:
-        settings = load_settings()
+        cfg_path = _get_user_config_path_for_settings(user)
+        settings = load_settings(cfg_path)
         ip = generate_character_images(ip, user, settings, char_ids=[char_id])
         return jsonify({"ip": ip.to_dict()})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ip/<ip_id>/character/<char_id>/image", methods=["GET"])
+def api_character_image(ip_id: str, char_id: str):
+    """返回角色参考图文件。"""
+    user = _require_user()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    char = ip.get_character(char_id)
+    if not char:
+        return jsonify({"error": "角色不存在"}), 404
+    ref_path = char.reference_image_path.strip()
+    if not ref_path:
+        return jsonify({"error": "暂无参考图"}), 404
+    p = Path(ref_path)
+    if not p.is_file():
+        from video2text.core.ip_manager import get_character_reference_path
+        p = get_character_reference_path(user, ip_id, char_id)
+    if not p.is_file():
+        return jsonify({"error": "参考图文件不存在"}), 404
+    return send_from_directory(p.parent, p.name, mimetype="image/jpeg")
 
 
 @app.route("/api/ip/<ip_id>/character/<char_id>/upload", methods=["POST"])
@@ -1661,8 +1692,10 @@ def api_upload_character_image(ip_id: str, char_id: str):
     if not f.filename:
         return jsonify({"error": "文件名为空"}), 400
 
-    import tempfile
-    tmp = Path(tempfile.mktemp(suffix=".jpg"))
+    import os, tempfile
+    fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    tmp = Path(tmp_path)
     f.save(str(tmp))
     try:
         dest = save_character_reference_image(user, ip_id, char_id, tmp)
@@ -1716,7 +1749,8 @@ def api_task_ip_theme():
             _update_task_meta(task_dir, {"status": "generating_storyboard"})
             _sse_push(task_id, "正在生成 IP 分镜…")
 
-            settings = load_settings()
+            cfg_path = _get_user_config_path_for_settings(user)
+            settings = load_settings(cfg_path)
             doc = generate_storyboard_from_ip(
                 ip, settings,
                 theme_hint=theme_hint,
@@ -1750,7 +1784,7 @@ def api_task_ip_theme():
             _update_task_meta(task_dir, {"status": "cancelled"})
             _sse_push(task_id, "任务已取消")
         except Exception as e:
-            _update_task_meta(task_dir, {"status": "error", "error": str(e)})
+            _update_task_meta(task_dir, {"status": "failed", "error": str(e)})
             _sse_push(task_id, f"错误：{e}")
 
     cancel_evt = threading.Event()
@@ -1777,15 +1811,6 @@ def _update_task_meta(task_dir: Path, updates: dict[str, Any]) -> None:
     )
 
 
-def _sse_push(task_id: str, message: str) -> None:
-    """向 SSE 订阅者推送消息。"""
-    with _sse_lock:
-        qs = _sse_queues.get(task_id, [])
-        for q in qs:
-            try:
-                q.put_nowait(message)
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------

@@ -276,8 +276,8 @@ NEXT_SHOT_SYSTEM = """You are a professional film screenwriter and storyboard di
 
 STRICT REQUIREMENTS:
 - Output **strict JSON only** (no Markdown code blocks, no preamble or postamble).
-- ALL text fields must be in ENGLISH. ABSOLUTELY NO Chinese, Japanese, Korean, or any non-English characters anywhere.
-- ALL dialogue MUST be in English. Characters MUST speak English regardless of the story's setting or the language of previous context. Write natural, fluent English dialogue.
+- Every field **except** `dialogue` must be in **English**.
+- **dialogue:** Speaker-attributed lines for this shot. Each line prefixed with the character's name: "CharName: spoken words". No stage directions, no SFX. Match the language of prior shots' dialogue. Empty string "" if no speech.
 - Output a single shot object with the following fields:
 
 {
@@ -306,7 +306,7 @@ CONTINUITY RULES:
 - ambient_sound should note if sounds from the previous shot continue, fade, or change.
 - character_action MUST use Present Continuous tense ("is walking", "is staring").
 - generation_prompt MUST include a spatial continuity cue and the character's actual name.
-- ALL fields must be in English."""
+- Do NOT paraphrase dialogue elsewhere: character_action may describe how they speak; dialogue holds speaker-attributed lines only."""
 
 
 def _normalize_characters_field(raw: Any) -> str:
