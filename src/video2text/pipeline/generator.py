@@ -19,10 +19,10 @@ class CancellationError(Exception):
     """Raised when the user cancels a running generation task."""
 
 
-import dashscope
+
 from dashscope import VideoSynthesis
 
-from video2text.config.settings import Settings
+from video2text.config.settings import Settings, resolve_theme_story_model
 from video2text.core.storyboard import Shot, StoryboardDocument
 from video2text.pipeline.composer import concat_videos_ffmpeg, reencode_concat
 from video2text.services.wan_video import (
@@ -438,7 +438,7 @@ def _llm_match_characters(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
-    model = (settings.theme_story_model or settings.vision_model).strip()
+    model = resolve_theme_story_model(settings)
     completion = client.chat.completions.create(
         model=model,
         messages=[
@@ -758,7 +758,6 @@ def generate_video_clip(
     Submit async video generation and wait for result URL.
     reference_* 为万相可选参数：参考图/视频 URL 或本地路径（SDK 可自动上传）。
     """
-    dashscope.base_http_api_url = settings.dashscope_api_base
     api_key = settings.dashscope_api_key
     if watermark is None:
         watermark = settings.video_watermark
@@ -1266,6 +1265,18 @@ def build_ip_media_array(
     return media, name_map
 
 
+def _build_ip_ref_hint(name_to_tag: dict[str, str]) -> str:
+    """为 IP 模式构建参考图说明（类似普通模式的 reference_subject_lock_hint）。"""
+    if not name_to_tag:
+        return ""
+    seen: dict[str, str] = {}
+    for name, tag in name_to_tag.items():
+        if tag not in seen:
+            seen[tag] = name
+    parts = [f"{tag} is {name}" for tag, name in sorted(seen.items())]
+    return "Reference images: " + ", ".join(parts) + "."
+
+
 def rewrite_prompt_for_ip_refs(
     prompt: str,
     name_to_tag: dict[str, str],
@@ -1319,22 +1330,41 @@ def build_ip_wan_clip_tasks(
     tasks: list[WanClipTask] = []
     for i, chunk in enumerate(chunks):
         chunk_chars = detect_characters_in_chunk(chunk, characters)
+
+        has_character_intent = any(
+            shot.characters_in_shot or shot.focal_character
+            for shot in chunk
+        )
+        if not chunk_chars and has_character_intent:
+            if poll_callback:
+                poll_callback(
+                    f"⚠ 第 {i+1}/{len(chunks)} 段：分镜标注了角色但未匹配到 IP 角色，"
+                    f"建议在分镜编辑中检查角色名"
+                )
+
         media, name_map = build_ip_media_array(chunk_chars, char_url_map)
 
+        ref_urls = [m["url"] for m in media if m["type"] == "image"]
+        ref_hint = _build_ip_ref_hint(name_map) if ref_urls else ""
+
         prompt, dur = build_wan_multi_shot_prompt(
-            chunk, "", "", max_duration=dur_cap,
+            chunk, "", ref_hint, max_duration=dur_cap,
         )
 
         prompt = rewrite_prompt_for_ip_refs(prompt, name_map, style_kw)
 
-        ref_urls = [m["url"] for m in media if m["type"] == "image"]
-
         if poll_callback:
-            char_names = [c.name for c in chunk_chars[:5]]
-            poll_callback(
-                f"第 {i+1}/{len(chunks)} 段：{len(chunk)} 镜头，"
-                f"角色 {char_names}，{len(ref_urls)} 张参考图"
-            )
+            if chunk_chars:
+                char_names = [c.name for c in chunk_chars[:5]]
+                poll_callback(
+                    f"第 {i+1}/{len(chunks)} 段：{len(chunk)} 镜头，"
+                    f"角色 {char_names}，{len(ref_urls)} 张参考图"
+                )
+            else:
+                poll_callback(
+                    f"第 {i+1}/{len(chunks)} 段：{len(chunk)} 镜头，"
+                    f"无角色参考（环境/物件镜头），走 t2v"
+                )
 
         tasks.append(
             WanClipTask(
@@ -1385,6 +1415,17 @@ def run_ip_storyboard_generation(
         max_segment_seconds=max_segment_seconds,
         poll_callback=cb,
     )
+
+    # 保存角色→图N 映射到分镜文档（供前端高亮显示 @角色名）
+    global_name_map: dict[str, str] = {}
+    all_chars = ip_profile.characters
+    _, full_map = build_ip_media_array(all_chars, char_url_map)
+    if full_map:
+        global_name_map = full_map
+        doc.ip_char_ref_map = global_name_map
+        storyboard_path = segments_dir.parent / "storyboard.json"
+        if storyboard_path.is_file():
+            doc.save_json(storyboard_path)
 
     segments_dir.mkdir(parents=True, exist_ok=True)
     if meta_update:

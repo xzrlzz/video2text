@@ -100,6 +100,7 @@ class StoryboardDocument:
     scene_geography: str = ""
     pacing_flow: str = ""
     rhythm_profile: str = ""
+    ip_char_ref_map: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -118,6 +119,8 @@ class StoryboardDocument:
         ):
             if v:
                 d[k] = v
+        if self.ip_char_ref_map:
+            d["ip_char_ref_map"] = self.ip_char_ref_map
         return d
 
     @classmethod
@@ -134,6 +137,7 @@ class StoryboardDocument:
             scene_geography=str(d.get("scene_geography", "")),
             pacing_flow=str(d.get("pacing_flow", "")),
             rhythm_profile=str(d.get("rhythm_profile", "")),
+            ip_char_ref_map=dict(d.get("ip_char_ref_map", {})),
         )
 
     def save_json(self, path: str | Path) -> None:

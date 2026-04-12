@@ -202,7 +202,7 @@ Output JSON only."""
 
 def _extract_json_object(text: str) -> dict[str, Any]:
     text = text.strip()
-    # Strip markdown fences if any
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         text = m.group(1).strip()
@@ -210,7 +210,11 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     end = text.rfind("}")
     if start < 0 or end <= start:
         raise ValueError(f"No JSON object in model output: {text[:500]}")
-    return json.loads(text[start : end + 1])
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        cleaned = re.sub(r",\s*([}\]])", r"\1", text[start : end + 1])
+        return json.loads(cleaned)
 
 
 # API hard limit for base64-encoded data-uri payload (DashScope/OpenAI compatible APIs)
@@ -380,10 +384,8 @@ def _analyze_clip_dashscope(
     fps: float,
     extra_user_hint: str,
 ) -> dict[str, Any]:
-    import dashscope
     from dashscope import MultiModalConversation
 
-    dashscope.base_http_api_url = settings.dashscope_api_base
     video_file_uri = f"file://{clip_path.resolve()}"
     messages = [
         {
@@ -819,10 +821,8 @@ def _run_full_video_dashscope_local_file(
     video_path: Path,
     style_hint: str,
 ) -> dict[str, Any]:
-    import dashscope
     from dashscope import MultiModalConversation
 
-    dashscope.base_http_api_url = settings.dashscope_api_base
     video_file_uri = f"file://{video_path.resolve()}"
     text = f"{DIRECTOR_SYSTEM}\n\n{_full_video_user_text(style_hint)}"
     messages = [

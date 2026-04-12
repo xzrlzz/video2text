@@ -11,7 +11,7 @@ from pathlib import Path
 
 import click
 
-from video2text.config.settings import load_settings
+from video2text.config.settings import load_settings, resolve_theme_story_model
 from video2text.core.analyzer import (
     analyze_full_video_local,
     analyze_full_video_url,
@@ -93,6 +93,15 @@ def cli(ctx: click.Context, config_path: str | None) -> None:
     """视频/主题 → 分镜；万相生成视频。"""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
+    try:
+        import dashscope
+        from video2text.config.settings import load_config_file
+        cfg = load_config_file(config_path)
+        dashscope.base_http_api_url = cfg.get(
+            "dashscope_api_base", "https://dashscope.aliyuncs.com/api/v1"
+        )
+    except Exception:
+        pass
 
 
 @cli.command("analyze")
@@ -231,7 +240,7 @@ def cmd_analyze(
 @click.option(
     "--model",
     default=None,
-    help="文本模型名；省略则用配置 theme_story_model，再省略同 vision_model",
+    help="文本模型名；省略则必须已在配置中填写 theme_story_model",
 )
 def cmd_theme(
     ctx: click.Context,
@@ -258,8 +267,13 @@ def cmd_theme(
     out_json = Path(output)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        display_model = resolve_theme_story_model(settings, override=model)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
     click.echo(
-        f"主题创作中（模型：{model or settings.theme_story_model or settings.vision_model}，镜头 {min_shots}～{max_shots}）\n"
+        f"主题创作中（模型：{display_model}，镜头 {min_shots}～{max_shots}）\n"
         f"  Phase 1：生成故事大纲…  Phase 2：设计分镜…"
     )
     doc = generate_storyboard_from_theme(
@@ -565,7 +579,7 @@ def cmd_generate(
 @click.option(
     "--theme-model",
     default=None,
-    help="仅 --theme 模式：创作用文本模型；省略同 theme 子命令",
+    help="仅 --theme 模式：覆盖 theme_story_model；省略则使用配置中的 theme_story_model",
 )
 @click.option(
     "--segment-scenes",
@@ -653,8 +667,12 @@ def cmd_run(
                 "已指定主题（--theme / --theme-file）时，不要同时使用 --input 或 --video-url。"
             )
         settings = load_settings(_resolve_config_path(ctx))
+        try:
+            display_model = resolve_theme_story_model(settings, override=theme_model)
+        except ValueError as e:
+            raise click.UsageError(str(e)) from e
         click.echo(
-            f"主题 → 分镜（模型 {theme_model or settings.theme_story_model or settings.vision_model}，"
+            f"主题 → 分镜（模型 {display_model}，"
             f"镜头 {min_shots}～{max_shots}）\n"
             f"  Phase 1：生成故事大纲…  Phase 2：设计分镜…"
         )

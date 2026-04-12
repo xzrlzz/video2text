@@ -77,43 +77,104 @@
         </div>
       </div>
 
-      <!-- IP 模式面板 -->
+      <!-- IP 模式面板（5 步依赖流） -->
       <div id="panel-ip-mode" class="hidden">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <label style="margin-bottom:0;">选择 IP</label>
-          <div style="display:flex;gap:6px;">
-            <button type="button" class="ghost sm" id="btn-refresh-ips">刷新</button>
-            <button type="button" class="primary sm" id="btn-create-ip">+ 创建新 IP</button>
-          </div>
+        <!-- 步骤条 -->
+        <div class="ip-steps-bar" id="ip-steps-bar">
+          <div class="ip-step active" data-step="1"><span class="ip-step-num">1</span><span class="ip-step-label">选择 IP</span></div>
+          <div class="ip-step-line"></div>
+          <div class="ip-step disabled" data-step="2"><span class="ip-step-num">2</span><span class="ip-step-label">角色资产</span></div>
+          <div class="ip-step-line"></div>
+          <div class="ip-step disabled" data-step="3"><span class="ip-step-num">3</span><span class="ip-step-label">生成故事</span></div>
+          <div class="ip-step-line"></div>
+          <div class="ip-step disabled" data-step="4"><span class="ip-step-num">4</span><span class="ip-step-label">生成分镜</span></div>
+          <div class="ip-step-line"></div>
+          <div class="ip-step disabled" data-step="5"><span class="ip-step-num">5</span><span class="ip-step-label">生成视频</span></div>
         </div>
-        <select id="ip-select" style="width:100%;margin-bottom:12px;">
-          <option value="">— 请选择或创建 IP —</option>
-        </select>
-        <div id="ip-detail-panel" class="hidden" style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px;">
-          <div style="display:flex;justify-content:space-between;align-items:start;">
-            <div>
-              <strong id="ip-detail-name"></strong>
-              <span id="ip-detail-tagline" style="color:var(--muted);margin-left:8px;"></span>
+
+        <!-- Step 1: 选择/创建 IP -->
+        <div class="ip-step-content" id="ip-step-1">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <label style="margin-bottom:0;">选择 IP</label>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="ghost sm" id="btn-refresh-ips">刷新</button>
+              <button type="button" class="primary sm" id="btn-create-ip">+ 创建新 IP</button>
             </div>
-            <button type="button" class="ghost sm" id="btn-manage-ip">管理</button>
           </div>
-          <div id="ip-characters-preview" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;"></div>
+          <select id="ip-select" style="width:100%;margin-bottom:12px;">
+            <option value="">— 请选择或创建 IP —</option>
+          </select>
+          <div id="ip-detail-panel" class="hidden" style="padding:12px;border:1px solid var(--border);border-radius:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:start;">
+              <div>
+                <strong id="ip-detail-name"></strong>
+                <span id="ip-detail-tagline" style="color:var(--muted);margin-left:8px;"></span>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button type="button" class="ghost sm" id="btn-manage-ip">管理</button>
+                <button type="button" class="ghost sm" id="btn-delete-ip" style="color:var(--danger);border-color:var(--danger);">删除</button>
+              </div>
+            </div>
+            <!-- IP 设定摘要（可编辑） -->
+            <div id="ip-settings-summary" style="margin-top:10px;"></div>
+          </div>
         </div>
-        <label>本期主题提示（可选）</label>
-        <input type="text" id="ip-theme-hint" placeholder="如：阿肥偷吃被发现" />
-        <div class="row">
-          <div>
-            <label>最少镜头</label>
-            <input type="number" id="ip-min-shots" value="8" min="3" max="40" />
+
+        <!-- Step 2: 角色资产 -->
+        <div class="ip-step-content hidden" id="ip-step-2">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <label style="margin-bottom:0;">角色资产</label>
+            <button type="button" class="primary sm" id="btn-gen-all-char-images">生成全部角色图</button>
           </div>
-          <div>
-            <label>最多镜头</label>
-            <input type="number" id="ip-max-shots" value="16" min="3" max="60" />
+          <div id="ip-char-cards"></div>
+          <div id="ip-char-progress" class="hidden" style="margin-top:12px;">
+            <div class="log" id="ip-char-log" style="max-height:120px;"></div>
           </div>
         </div>
-        <div class="flex" style="margin-top:16px;">
-          <button type="button" class="primary" id="btn-ip-gen-storyboard">生成 IP 分镜</button>
-          <button type="button" id="btn-ip-gen-all">IP 分镜 + 生成视频</button>
+
+        <!-- Step 3: 生成故事 -->
+        <div class="ip-step-content hidden" id="ip-step-3">
+          <label>本期主题提示（可选）</label>
+          <input type="text" id="ip-theme-hint" placeholder="如：阿肥偷吃被发现" />
+          <div class="flex" style="margin-top:12px;">
+            <button type="button" class="primary" id="btn-ip-gen-story">生成故事大纲</button>
+          </div>
+          <div id="ip-story-preview" class="hidden" style="margin-top:16px;"></div>
+        </div>
+
+        <!-- Step 4: 生成分镜 -->
+        <div class="ip-step-content hidden" id="ip-step-4">
+          <div class="row">
+            <div>
+              <label>最少镜头</label>
+              <input type="number" id="ip-min-shots" value="8" min="3" max="40" />
+            </div>
+            <div>
+              <label>最多镜头</label>
+              <input type="number" id="ip-max-shots" value="16" min="3" max="60" />
+            </div>
+          </div>
+          <div class="flex" style="margin-top:12px;">
+            <button type="button" class="primary" id="btn-ip-gen-storyboard">生成 IP 分镜</button>
+          </div>
+          <div id="ip-storyboard-status" class="hidden" style="margin-top:12px;color:var(--muted);font-size:13px;"></div>
+        </div>
+
+        <!-- Step 5: 生成视频 -->
+        <div class="ip-step-content hidden" id="ip-step-5">
+          <div class="row">
+            <div>
+              <label>并发数</label>
+              <input type="number" id="ip-max-workers" value="4" min="1" max="8" />
+            </div>
+            <div>
+              <label>分辨率（可选）</label>
+              <input type="text" id="ip-gen-resolution" placeholder="720*1280" />
+            </div>
+          </div>
+          <div class="flex" style="margin-top:12px;">
+            <button type="button" class="primary" id="btn-ip-gen-video">生成视频</button>
+          </div>
         </div>
       </div>
 
@@ -267,9 +328,9 @@
     <input type="text" id="cfg-api-base" />
     <label>vision_model</label>
     <input type="text" id="cfg-vision" />
-    <label>theme_story_model</label>
+    <label>theme_story_model <span style="font-weight:normal;color:var(--muted);font-size:11px;">（主题分镜、翻译、主体提取等必填）</span></label>
     <input type="text" id="cfg-theme-model" />
-    <label>theme_idea_model <span style="font-weight:normal;color:var(--muted);font-size:11px;">（「生成创意」按钮专用模型，空则用 theme_story_model）</span></label>
+    <label>theme_idea_model <span style="font-weight:normal;color:var(--muted);font-size:11px;">（「生成创意」按钮必填）</span></label>
     <input type="text" id="cfg-idea-model" />
     <label>video_gen_model</label>
     <input type="text" id="cfg-gen" />

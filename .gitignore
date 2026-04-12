@@ -15,6 +15,7 @@ data/input/*
 data/output/*
 !data/output/.gitkeep
 data/workspace/
+data/ip/
 data/config/*
 !data/config/.gitkeep
 !data/config/config.example.json

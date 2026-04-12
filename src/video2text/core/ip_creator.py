@@ -16,7 +16,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from video2text.config.settings import Settings
+from video2text.config.settings import Settings, resolve_theme_story_model
 from video2text.core.analyzer import _extract_json_object
 from video2text.core.ip_manager import (
     IPCharacter,
@@ -138,9 +138,7 @@ def generate_ip_proposal(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
-    use_model = (model or settings.theme_story_model or settings.vision_model).strip()
-    if not use_model:
-        use_model = settings.vision_model
+    use_model = resolve_theme_story_model(settings, override=model)
 
     style_list = format_styles_for_llm()
     system = IP_CREATOR_SYSTEM.replace("{style_list}", style_list)
@@ -279,3 +277,80 @@ def generate_character_images(
 
     save_ip(username, profile)
     return profile
+
+
+# ---------------------------------------------------------------------------
+# AI 润色
+# ---------------------------------------------------------------------------
+
+_REFINE_SYSTEM = """You are an expert creative director. The user will provide:
+1. The full IP context (name, visual_dna, story_dna, characters, etc.)
+2. A SECTION of the IP they want to refine (e.g. visual_dna, story_dna, a character)
+3. The CURRENT CONTENT of that section
+4. Their INSTRUCTION for how to modify it
+
+Your task: apply the user's instruction to modify the section while maintaining consistency with the rest of the IP. Output ONLY the modified section as strict JSON (no Markdown, no preamble). Keep the same JSON schema/keys as the input.
+
+RULES:
+- Maintain consistency with the IP's overall style, tone, and world
+- Only change what the user asks for; preserve everything else
+- If modifying a character, keep visual_description detailed enough for text-to-image
+- All English content stays English; Chinese content stays Chinese (matching original)
+"""
+
+
+def refine_ip_section(
+    profile: IPProfile,
+    settings: Settings,
+    *,
+    section: str,
+    instruction: str,
+    current_content: str | dict | list = "",
+    model: str | None = None,
+) -> dict | str:
+    """AI 润色 IP 的某个段落。
+
+    Args:
+        profile: IP profile（提供全局 context）
+        settings: 配置
+        section: 段落类型，如 visual_dna / story_dna / world_dna / character / story_outline / storyboard_shot
+        instruction: 用户的修改意见
+        current_content: 当前内容（JSON dict/list 或字符串）
+
+    Returns:
+        修改后的内容（与输入格式匹配）
+    """
+    client = OpenAI(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.base_url,
+    )
+    use_model = resolve_theme_story_model(settings, override=model)
+
+    ip_context = json.dumps(profile.to_dict(), ensure_ascii=False, indent=2)
+    if isinstance(current_content, (dict, list)):
+        content_str = json.dumps(current_content, ensure_ascii=False, indent=2)
+    else:
+        content_str = str(current_content)
+
+    user_msg = (
+        f"=== IP CONTEXT ===\n{ip_context}\n=== END CONTEXT ===\n\n"
+        f"SECTION: {section}\n\n"
+        f"CURRENT CONTENT:\n{content_str}\n\n"
+        f"INSTRUCTION: {instruction}\n\n"
+        f"Output the modified section as strict JSON only."
+    )
+
+    log.info("Refining IP section=%s, instruction=%s", section, instruction[:100])
+    completion = client.chat.completions.create(
+        model=use_model,
+        messages=[
+            {"role": "system", "content": _REFINE_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=4096,
+    )
+    raw = completion.choices[0].message.content or ""
+    try:
+        return _extract_json_object(raw)
+    except Exception:
+        return raw.strip()

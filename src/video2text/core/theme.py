@@ -13,7 +13,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from video2text.config.settings import Settings
+from video2text.config.settings import Settings, resolve_theme_story_model
 from video2text.core.analyzer import _extract_json_object, _shot_from_analysis_dict
 from video2text.core.storyboard import Shot, StoryboardDocument
 
@@ -23,6 +23,47 @@ if TYPE_CHECKING:
     from video2text.core.ip_manager import IPProfile
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 共享提示词片段（在多个 system prompt 中复用，避免重复维护）
+# ---------------------------------------------------------------------------
+
+_GENERATION_PROMPT_RULES = """GENERATION_PROMPT CONSTRUCTION RULES (EXTREMELY CRITICAL):
+Each generation_prompt MUST be a single, cohesive English sentence or paragraph that includes:
+1. FRAMING: Translate shot_type into explicit visual language. Do NOT use film terms like "CU" alone. Write: "Close-up framing from nose to forehead" or "Wide shot showing full body and surrounding forest".
+2. KEY POSE ANCHOR: Describe the subject's EXACT initial physical state to lock the starting frame. Use: "standing motionless", "seated with hands folded", "mid-stride frozen". This prevents unwanted jitter.
+3. ACTION: Use PRESENT CONTINUOUS tense. "She is walking slowly towards camera" NOT "She walks".
+4. SPATIAL CONTINUITY CUE: Include a visual anchor that ties this shot to the established location or previous shot. Example: "The same rain-streaked window from the previous shot now fills the background."
+5. LIGHTING MOOD: Incorporate the lighting field description naturally into the visual scene.
+6. CHARACTER REFERENCE: Use the character's EXACT name from the characters list. For downstream consistency, the prompt must reference the character's visual traits as described in the character list.
+7. CINEMATIC QUALIFIER: Append a short style anchor: "Cinematic 35mm film, shallow depth of field, natural motion blur."
+
+GENERATION_PROMPT EXAMPLE (Showing continuity with previous shot):
+"Medium shot framing from waist to top of head. EMMA is standing motionless in the same dim hallway from the establishing shot, her back now against the peeling wallpaper. She is staring directly into the lens with a tense expression, her eyes darting slightly leftward following the sound heard in previous shot. Hard key light from a single overhead bulb casting sharp shadows across her jawline. Cinematic 35mm film, shallow depth of field, natural motion blur.\""""
+
+_DIALOGUE_FORMAT = """DIALOGUE FORMAT:
+- Format: "CHARACTER_NAME: \\"Exact dialogue text.\\""
+- Use exact character names from the characters list.
+- Empty string "" for shots with no spoken words."""
+
+_LANGUAGE_RULES = """LANGUAGE ENFORCEMENT (ABSOLUTE — ZERO EXCEPTIONS):
+- ALL JSON text fields must be ENGLISH. No Chinese, Japanese, Korean, or ANY non-English characters allowed.
+- ALL dialogue MUST be in English. Characters MUST speak English. Even if the user's theme/brief is in Chinese, you MUST write all dialogue in natural, fluent English. Treat it like dubbing a film into English.
+- If the story setting requires non-English environmental text (e.g., a street sign in Chinese), describe it in English within scene_description: "A neon sign with Chinese characters glowing red."
+- VALIDATION: Before outputting, scan every "dialogue" field — if ANY contains non-English characters, rewrite it in English."""
+
+_AUDIO_RULES = """AUDIO FIELD CLARIFICATION:
+- ambient_sound: STRICTLY for sounds occurring inside the world of the film (doors creaking, wind, footsteps). This may be used for AI sound effect generation. If there is no dialogue, ambient_sound MUST be populated to prevent dead air.
+- ambient_sound should maintain continuity: if wind is established in shot 1, it should persist in subsequent shots of the same scene unless explicitly stopped.
+- score_suggestion: For post-production reference ONLY. Do not merge with ambient_sound."""
+
+_PACING_RULES = """PACING AND TENSION BUILDING (SHORT-FORM — EVERY SECOND COUNTS):
+- DEFAULT: Most shots are ~2 seconds. Only add time for dialogue delivery.
+- To create urgency: Use 1.5-2s shots with SMASH_CUT. Dialogue fragments only.
+- To build tension: Use 2s shots, slowing to 3s at the emotional peak, then back to 2s.
+- For compact storytelling: NO pure establishing shots. Start in medias res. Use detail inserts (hands, eyes, objects) to convey information in 2s.
+- Every shot must either: (a) advance plot, (b) reveal character, or (c) build mood. If a shot does none of these, cut it.
+- Keep dialogue lines SHORT — one sentence max per shot. Split longer exchanges across multiple 3s shots."""
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Story Architect
@@ -234,42 +275,7 @@ SHOT SEQUENCING AND TIMING RULES (SHORT-FORM VIDEO — FAST PACING):
 - 70-80% of shots should be ~2 seconds. Only dialogue shots should be longer.
 - Every sequence of 3 shots must contain at least one clear visual link (object, color, motion, or spatial reference) that connects them.
 
-GENERATION_PROMPT CONSTRUCTION RULES (EXTREMELY CRITICAL):
-Each generation_prompt MUST be a single, cohesive English sentence or paragraph that includes:
-1. FRAMING: Translate shot_type into explicit visual language. Do NOT use film terms like "CU" alone. Write: "Close-up framing from nose to forehead" or "Wide shot showing full body and surrounding forest".
-2. KEY POSE ANCHOR: Describe the subject's EXACT initial physical state to lock the starting frame. Use: "standing motionless", "seated with hands folded", "mid-stride frozen". This prevents unwanted jitter.
-3. ACTION: Use PRESENT CONTINUOUS tense. "She is walking slowly towards camera" NOT "She walks".
-4. SPATIAL CONTINUITY CUE: Include a visual anchor that ties this shot to the established location or previous shot. Example: "The same rain-streaked window from the previous shot now fills the background."
-5. LIGHTING MOOD: Incorporate the lighting field description naturally into the visual scene.
-6. CHARACTER REFERENCE: Use the character's EXACT name from the characters list. For downstream consistency, the prompt must reference the character's visual traits as described in the character list.
-7. CINEMATIC QUALIFIER: Append a short style anchor: "Cinematic 35mm film, shallow depth of field, natural motion blur."
-
-GENERATION_PROMPT EXAMPLE (Showing continuity with previous shot):
-"Medium shot framing from waist to top of head. EMMA is standing motionless in the same dim hallway from the establishing shot, her back now against the peeling wallpaper. She is staring directly into the lens with a tense expression, her eyes darting slightly leftward following the sound heard in previous shot. Hard key light from a single overhead bulb casting sharp shadows across her jawline. Cinematic 35mm film, shallow depth of field, natural motion blur."
-
-AUDIO FIELD CLARIFICATION:
-- ambient_sound: STRICTLY for sounds occurring inside the world of the film (doors creaking, wind, footsteps). This may be used for AI sound effect generation. If there is no dialogue, ambient_sound MUST be populated to prevent dead air.
-- ambient_sound should maintain continuity: if wind is established in shot 1, it should persist in subsequent shots of the same scene unless explicitly stopped.
-- score_suggestion: For post-production reference ONLY. Do not merge with ambient_sound.
-
-DIALOGUE FORMAT:
-- Format: "CHARACTER_NAME: \\"Exact dialogue text.\\""
-- Use exact character names from the characters list.
-- Empty string "" for shots with no spoken words.
-
-LANGUAGE ENFORCEMENT (ABSOLUTE — ZERO EXCEPTIONS):
-- ALL JSON text fields must be ENGLISH. No Chinese, Japanese, Korean, or ANY non-English characters allowed.
-- ALL dialogue MUST be in English. Characters MUST speak English. Even if the user's theme/brief is in Chinese, you MUST write all dialogue in natural, fluent English. Treat it like dubbing a film into English.
-- If the story setting requires non-English environmental text (e.g., a street sign in Chinese), describe it in English within scene_description: "A neon sign with Chinese characters glowing red."
-- VALIDATION: Before outputting, scan every "dialogue" field — if ANY contains non-English characters, rewrite it in English.
-
-PACING AND TENSION BUILDING (SHORT-FORM — EVERY SECOND COUNTS):
-- DEFAULT: Most shots are ~2 seconds. Only add time for dialogue delivery.
-- To create urgency: Use 1.5-2s shots with SMASH_CUT. Dialogue fragments only.
-- To build tension: Use 2s shots, slowing to 3s at the emotional peak, then back to 2s.
-- For compact storytelling: NO pure establishing shots. Start in medias res. Use detail inserts (hands, eyes, objects) to convey information in 2s.
-- Every shot must either: (a) advance plot, (b) reveal character, or (c) build mood. If a shot does none of these, cut it.
-- Keep dialogue lines SHORT — one sentence max per shot. Split longer exchanges across multiple 3s shots."""
+""" + _GENERATION_PROMPT_RULES + "\n\n" + _AUDIO_RULES + "\n\n" + _DIALOGUE_FORMAT + "\n\n" + _LANGUAGE_RULES + "\n\n" + _PACING_RULES
 
 
 NEXT_SHOT_SYSTEM = """You are a professional film screenwriter and storyboard director. The user will provide an existing shot list and overall story information. You need to write the next shot that maintains VISUAL CONTINUITY with the previous shots.
@@ -439,9 +445,7 @@ def generate_storyboard_from_theme(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
-    use_model = (model or settings.theme_story_model or settings.vision_model).strip()
-    if not use_model:
-        use_model = settings.vision_model
+    use_model = resolve_theme_story_model(settings, override=model)
 
     # ------ Phase 1: Story Architect ------
     outline: dict[str, Any] | None = None
@@ -565,9 +569,7 @@ def generate_next_shot(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
-    use_model = (model or settings.theme_story_model or settings.vision_model).strip()
-    if not use_model:
-        use_model = settings.vision_model
+    use_model = resolve_theme_story_model(settings, override=model)
 
     recent = existing_shots[-6:] if len(existing_shots) > 6 else existing_shots
     context_lines = []
@@ -703,7 +705,7 @@ JSON SCHEMA:
 {
   "title": "string",
   "synopsis": "string",
-  "rhythm_profile": "TENSE_RAPID | ACTION_DRIVEN | EMOTIONAL_CRESCENDO",
+  "rhythm_profile": "TENSE_RAPID | CONTEMPLATIVE_SLOW | ACTION_DRIVEN | EMOTIONAL_CRESCENDO",
   "characters": [{"name": "EXACT character name", "description": "visual description from IP"}],
   "shots": [
     {
@@ -760,6 +762,26 @@ def _build_ip_character_roster(profile: IPProfile) -> str:
             f"behaviors={c.behavior_patterns}"
         )
     return "\n".join(lines)
+
+
+def generate_ip_story_outline(
+    ip_profile: IPProfile,
+    settings: Settings,
+    *,
+    theme_hint: str = "",
+    min_shots: int = 8,
+    max_shots: int = 16,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """公开接口：基于 IP 世界观生成单集故事大纲（Phase 1 only）。"""
+    client = OpenAI(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.base_url,
+    )
+    use_model = resolve_theme_story_model(settings, override=model)
+    return _generate_ip_story_outline(
+        ip_profile, theme_hint, client, use_model, min_shots, max_shots,
+    )
 
 
 def _generate_ip_story_outline(
@@ -869,10 +891,11 @@ def generate_storyboard_from_ip(
     min_shots: int = 8,
     max_shots: int = 16,
     model: str | None = None,
+    story_outline: dict[str, Any] | None = None,
 ) -> StoryboardDocument:
     """IP 模式：两阶段流程生成分镜文档。
 
-    Phase 1 — IP Story Architect: 基于 IP 世界观生成单集故事
+    Phase 1 — IP Story Architect: 基于 IP 世界观生成单集故事（可传入已有大纲跳过）
     Phase 2 — IP Shot Designer: 分镜设计，generation_prompt 中引用角色名
     """
     min_shots = max(3, min(40, int(min_shots)))
@@ -882,15 +905,17 @@ def generate_storyboard_from_ip(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
-    use_model = (model or settings.theme_story_model or settings.vision_model).strip()
-    if not use_model:
-        use_model = settings.vision_model
+    use_model = resolve_theme_story_model(settings, override=model)
 
-    # Phase 1
-    log.info("IP Phase 1 — Story Architect for IP %r…", ip_profile.name)
-    outline = _generate_ip_story_outline(
-        ip_profile, theme_hint, client, use_model, min_shots, max_shots,
-    )
+    # Phase 1: use provided outline or generate a new one
+    if story_outline:
+        log.info("IP Phase 1 — using provided story outline")
+        outline = story_outline
+    else:
+        log.info("IP Phase 1 — Story Architect for IP %r…", ip_profile.name)
+        outline = _generate_ip_story_outline(
+            ip_profile, theme_hint, client, use_model, min_shots, max_shots,
+        )
     beats = outline.get("narrative_beats") or []
     log.info(
         "IP Phase 1 complete: title=%r, %d beats",

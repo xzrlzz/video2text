@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -93,8 +93,220 @@ class Settings:
 
 
 SETTINGS_FIELDS: frozenset[str] = frozenset(
-    f.name for f in __import__("dataclasses").fields(Settings)
+    f.name for f in fields(Settings)
 )
+
+SETTINGS_FIELD_ORDER: tuple[str, ...] = tuple(f.name for f in fields(Settings))
+
+SETTINGS_DEFAULTS: dict[str, Any] = {}
+for _f in fields(Settings):
+    if _f.default is not MISSING:
+        SETTINGS_DEFAULTS[_f.name] = _f.default
+    elif _f.default_factory is not MISSING:
+        SETTINGS_DEFAULTS[_f.name] = _f.default_factory()
+    else:
+        # 目前仅 dashscope_api_key 为无默认必填项。
+        SETTINGS_DEFAULTS[_f.name] = ""
+
+
+# 系统级配置：仅管理员/全局配置控制，用户配置文件不允许长期覆盖。
+SYSTEM_ONLY_FIELDS: frozenset[str] = frozenset(
+    {
+        "base_url",
+        "dashscope_api_base",
+        "task_ttl_days",
+        "max_workers",
+        "video_watermark",
+        "video_prompt_extend",
+    }
+)
+
+# 用户必须显式配置的密钥字段（不从全局默认继承）。
+SECRET_USER_REQUIRED_FIELDS: frozenset[str] = frozenset({"dashscope_api_key"})
+
+# 用户长期偏好字段（重启后仍生效）。
+USER_PERSISTENT_FIELDS: frozenset[str] = frozenset(
+    f
+    for f in SETTINGS_FIELDS
+    if f not in SYSTEM_ONLY_FIELDS and f not in SECRET_USER_REQUIRED_FIELDS
+)
+
+# 任务级临时覆盖字段（仅本任务生效，不写用户配置）。
+TASK_TRANSIENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "style",
+        "min_shots",
+        "max_shots",
+        "max_segment_seconds",
+        "resolution",
+        "workers",
+        "theme_model",
+        "model",
+        "threshold",
+        "segment_scenes",
+        "skip_consolidate",
+        "text_only_video",
+        "require_reference",
+        "no_require_reference",
+    }
+)
+
+TASK_OVERRIDE_TO_SETTINGS_FIELD: dict[str, str] = {
+    "max_segment_seconds": "max_segment_seconds",
+    "resolution": "default_resolution",
+}
+
+SETTINGS_ENV_MAP: dict[str, str] = {
+    "dashscope_api_key": "DASHSCOPE_API_KEY",
+    "base_url": "V2T_BASE_URL",
+    "dashscope_api_base": "DASHSCOPE_HTTP_BASE",
+    "vision_model": "V2T_VISION_MODEL",
+    "theme_story_model": "V2T_THEME_MODEL",
+    "theme_idea_model": "V2T_THEME_IDEA_MODEL",
+    "video_gen_model": "V2T_GEN_MODEL",
+    "video_ref_model": "V2T_REF_MODEL",
+    "default_resolution": "V2T_RESOLUTION",
+    "image_gen_model": "IMAGE_GEN_MODEL",
+    "image_gen_thinking_mode": "IMAGE_GEN_THINKING_MODE",
+    "image_gen_size": "IMAGE_GEN_SIZE",
+    "max_video_base64_mb": "V2T_MAX_VIDEO_BASE64_MB",
+    "scene_detect_threshold": "V2T_SCENE_THRESHOLD",
+    "analysis_fps": "V2T_ANALYSIS_FPS",
+    "max_segment_seconds": "V2T_MAX_SEGMENT_SECONDS",
+    "require_reference": "V2T_REQUIRE_REFERENCE",
+    "per_chunk_reference_filter": "V2T_PER_CHUNK_REF_FILTER",
+    "task_ttl_days": "V2T_TASK_TTL_DAYS",
+    "max_workers": "V2T_MAX_WORKERS",
+    "video_watermark": "V2T_VIDEO_WATERMARK",
+    "video_prompt_extend": "V2T_VIDEO_PROMPT_EXTEND",
+}
+
+
+def allowed_user_config_fields() -> frozenset[str]:
+    """用户配置文件可持久化字段（含用户必填密钥）。"""
+    return USER_PERSISTENT_FIELDS | SECRET_USER_REQUIRED_FIELDS
+
+
+def allowed_admin_config_fields() -> frozenset[str]:
+    """管理员可配置字段（全量 Settings 字段）。"""
+    return SETTINGS_FIELDS
+
+
+def allowed_task_override_fields() -> frozenset[str]:
+    """任务级可临时覆盖字段。"""
+    return TASK_TRANSIENT_FIELDS
+
+
+def filter_task_overrides(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """过滤出允许的任务级临时覆盖字段。"""
+    if not data:
+        return {}
+    out: dict[str, Any] = {}
+    for k in TASK_TRANSIENT_FIELDS:
+        if k in data and data[k] is not None:
+            out[k] = data[k]
+    return out
+
+
+def _normalize_layer_value(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return s if s else None
+    return v
+
+
+def normalize_user_config_delta(
+    global_cfg: dict[str, Any] | None,
+    user_cfg: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    归一化用户配置为“差异集”：
+    - 仅保留允许的用户字段；
+    - 普通字段与全局相同则不保存；
+    - dashscope_api_key 作为用户显式密钥，非空则保留。
+    """
+    g = global_cfg or {}
+    u = user_cfg or {}
+    out: dict[str, Any] = {}
+    for k in allowed_user_config_fields():
+        if k not in u:
+            continue
+        raw_v = u.get(k)
+        if k in SECRET_USER_REQUIRED_FIELDS:
+            v = _normalize_layer_value(raw_v)
+            if v is not None:
+                out[k] = v
+            continue
+        v = _normalize_layer_value(raw_v)
+        if v is None:
+            continue
+        gv = _normalize_layer_value(g.get(k))
+        if gv == v:
+            continue
+        out[k] = v
+    return out
+
+
+def resolve_effective_settings_dict(
+    global_cfg: dict[str, Any] | None = None,
+    user_cfg: dict[str, Any] | None = None,
+    task_overrides: dict[str, Any] | None = None,
+    *,
+    enforce_user_api_key: bool = False,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """
+    统一分层解析（default < global < user_persistent < task_transient < env）。
+    返回最终配置与字段来源映射。
+    """
+    g = global_cfg or {}
+    u = user_cfg or {}
+    t = task_overrides or {}
+
+    effective = {k: SETTINGS_DEFAULTS.get(k, "") for k in SETTINGS_FIELD_ORDER}
+    sources: dict[str, str] = {k: "default" for k in SETTINGS_FIELD_ORDER}
+
+    for k in SETTINGS_FIELD_ORDER:
+        if k == "dashscope_api_key" and enforce_user_api_key:
+            # Web 用户模式下不继承全局密钥。
+            continue
+        if k not in g:
+            continue
+        v = _normalize_layer_value(g.get(k))
+        if v is None:
+            continue
+        effective[k] = v
+        sources[k] = "global"
+
+    allowed_user = allowed_user_config_fields()
+    for k in SETTINGS_FIELD_ORDER:
+        if k not in allowed_user or k not in u:
+            continue
+        v = _normalize_layer_value(u.get(k))
+        if v is None:
+            continue
+        effective[k] = v
+        sources[k] = "user_persistent"
+
+    for tk, tv in filter_task_overrides(t).items():
+        sk = TASK_OVERRIDE_TO_SETTINGS_FIELD.get(tk, tk)
+        if sk not in SETTINGS_FIELDS:
+            continue
+        v = _normalize_layer_value(tv)
+        if v is None:
+            continue
+        effective[sk] = v
+        sources[sk] = "task_transient"
+
+    for sk, env_name in SETTINGS_ENV_MAP.items():
+        ev = os.getenv(env_name, "").strip()
+        if not ev:
+            continue
+        effective[sk] = ev
+        sources[sk] = "env"
+
+    return effective, sources
 
 
 def _default_config_search_paths() -> list[Path]:
@@ -288,3 +500,31 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
 def load_settings_from_dict(cfg: dict[str, Any]) -> Settings:
     """从已合并的 dict 构造 Settings（不读文件），供 Web 层在内存合并后调用。"""
     return _build_settings_from_dict(cfg)
+
+
+THEME_STORY_MODEL_REQUIRED_MSG = (
+    "请先在配置中填写 theme_story_model，或设置环境变量 V2T_THEME_MODEL。"
+)
+THEME_IDEA_MODEL_REQUIRED_MSG = (
+    "请先在配置中填写 theme_idea_model，或设置环境变量 V2T_THEME_IDEA_MODEL。"
+)
+
+
+def resolve_theme_story_model(settings: Settings, *, override: str | None = None) -> str:
+    """主题分镜、翻译、主体提取等文案类 LLM 使用的模型；不再回退到 vision_model。"""
+    if override is not None:
+        m = override.strip()
+        if m:
+            return m
+    m = (settings.theme_story_model or "").strip()
+    if not m:
+        raise ValueError(THEME_STORY_MODEL_REQUIRED_MSG)
+    return m
+
+
+def resolve_theme_idea_model(settings: Settings) -> str:
+    """「生成创意」专用模型；不再回退到 theme_story_model。"""
+    m = (settings.theme_idea_model or "").strip()
+    if not m:
+        raise ValueError(THEME_IDEA_MODEL_REQUIRED_MSG)
+    return m
