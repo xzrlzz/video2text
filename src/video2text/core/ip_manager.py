@@ -86,6 +86,45 @@ class WorldDNA:
 
 
 @dataclass
+class VoiceProfile:
+    """角色音色配置。"""
+    mode: str = ""                   # "preset" | "clone" | ""（未设置）
+    preset_id: str = ""              # CosyVoice 预置音色 ID（如 "longshu_v3"）
+    preset_name: str = ""            # 显示名（如 "沉稳青年男"）
+    reference_audio_path: str = ""   # 克隆模式：用户上传的参考音频本地路径
+    reference_audio_url: str = ""    # 上传到 OSS 后的公网 URL（wan2.7 用）
+    clone_voice_id: str = ""         # CosyVoice 克隆后的 voice_id
+    provider: str = "cosyvoice"      # "cosyvoice" | "fish_speech"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> VoiceProfile:
+        if not d:
+            return cls()
+        return cls(**{k: str(d.get(k, "")) for k in cls.__dataclass_fields__})
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.mode)
+
+    @property
+    def effective_voice_id(self) -> str:
+        """返回 TTS 调用时使用的 voice ID。"""
+        if self.mode == "clone" and self.clone_voice_id:
+            return self.clone_voice_id
+        if self.mode == "preset" and self.preset_id:
+            return self.preset_id
+        return ""
+
+    @property
+    def effective_audio_url(self) -> str:
+        """返回 wan2.7 reference_voice 使用的音频 URL。"""
+        return self.reference_audio_url or ""
+
+
+@dataclass
 class IPCharacter:
     id: str = ""
     name: str = ""
@@ -97,9 +136,12 @@ class IPCharacter:
     relationship: str = ""
     reference_image_path: str = ""
     reference_type: str = ""  # generated / uploaded
+    voice_profile: VoiceProfile = field(default_factory=VoiceProfile)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["voice_profile"] = self.voice_profile.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> IPCharacter:
@@ -114,6 +156,7 @@ class IPCharacter:
             relationship=str(d.get("relationship", "")),
             reference_image_path=str(d.get("reference_image_path", "")),
             reference_type=str(d.get("reference_type", "")),
+            voice_profile=VoiceProfile.from_dict(d.get("voice_profile") or {}),
         )
 
 
@@ -127,6 +170,7 @@ class IPProfile:
     story_dna: StoryDNA = field(default_factory=StoryDNA)
     world_dna: WorldDNA = field(default_factory=WorldDNA)
     characters: list[IPCharacter] = field(default_factory=list)
+    narrator_voice: VoiceProfile = field(default_factory=VoiceProfile)
     created_at: str = ""
     updated_at: str = ""
 
@@ -140,6 +184,7 @@ class IPProfile:
             "story_dna": self.story_dna.to_dict(),
             "world_dna": self.world_dna.to_dict(),
             "characters": [c.to_dict() for c in self.characters],
+            "narrator_voice": self.narrator_voice.to_dict(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -157,6 +202,7 @@ class IPProfile:
             characters=[
                 IPCharacter.from_dict(c) for c in (d.get("characters") or [])
             ],
+            narrator_voice=VoiceProfile.from_dict(d.get("narrator_voice") or {}),
             created_at=str(d.get("created_at", "")),
             updated_at=str(d.get("updated_at", "")),
         )
@@ -273,6 +319,13 @@ def get_character_reference_path(
 ) -> Path:
     """返回角色参考图的标准存储路径。"""
     return _char_dir(username, ip_id, char_id) / "reference.jpg"
+
+
+def get_character_voice_path(
+    username: str, ip_id: str, char_id: str
+) -> Path:
+    """返回角色参考音频的标准存储路径。"""
+    return _char_dir(username, ip_id, char_id) / "voice_ref.wav"
 
 
 def save_character_reference_image(

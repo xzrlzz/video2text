@@ -50,3 +50,60 @@ def reencode_concat(video_paths: list[Path], output_path: Path) -> None:
         ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
          "-c:a", "aac", "-movflags", "+faststart"],
     )
+
+
+def merge_audio_video(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    *,
+    replace_audio: bool = True,
+) -> None:
+    """将音频轨合并到视频文件中。
+
+    replace_audio=True: 替换原有音频（用于静音视频 + TTS 音频）
+    replace_audio=False: 混合原有音频和新音频
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if replace_audio:
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-c:v", "copy",
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=shortest:dropout_transition=2[aout]",
+            "-map", "0:v:0",
+            "-map", "[aout]",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+    subprocess.run(cmd, check=True)
+
+
+def strip_audio(video_path: Path, output_path: Path) -> None:
+    """移除视频中的音频轨。"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-c:v", "copy", "-an",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True)

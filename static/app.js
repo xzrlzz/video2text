@@ -2283,6 +2283,13 @@
   if ($('#btn-refresh-ips')) $('#btn-refresh-ips').onclick = () => loadIPList();
 
   // ── Step 2: 角色资产卡片 ──
+  let _voicePresets = null;
+  async function loadVoicePresets() {
+    if (_voicePresets) return _voicePresets;
+    try { _voicePresets = await api('/api/voices'); } catch (e) { _voicePresets = []; }
+    return _voicePresets;
+  }
+
   function renderCharCards(ip) {
     const container = $('#ip-char-cards');
     if (!container) return;
@@ -2291,6 +2298,10 @@
       const card = document.createElement('div');
       card.className = 'ip-char-card';
       const hasImg = !!c.reference_image_path;
+      const vp = c.voice_profile || {};
+      const voiceLabel = vp.mode === 'preset' ? (vp.preset_name || vp.preset_id || '预置')
+                       : vp.mode === 'clone' ? '克隆音色'
+                       : '未设置';
       card.innerHTML = `
         <div class="ip-char-card-img">
           ${hasImg
@@ -2302,6 +2313,11 @@
           <div class="ip-char-card-name">${escapeHtml(c.name)} <span style="color:var(--muted);font-weight:400;font-size:12px;">(${escapeHtml(c.name_en)})</span></div>
           <span class="ip-char-card-role ${c.role === 'protagonist' ? 'protagonist' : 'supporting'}">${c.role === 'protagonist' ? '主角' : '配角'}</span>
           <div class="ip-char-card-desc">${escapeHtml((c.visual_description || '').substring(0, 120))}</div>
+          <div class="ip-char-card-voice">
+            <span class="voice-label" title="角色音色">🎙 ${escapeHtml(voiceLabel)}</span>
+            <button type="button" class="ghost sm" data-action="voice" data-char-id="${c.id}">设置音色</button>
+            ${vp.mode ? `<button type="button" class="ghost sm" data-action="preview-voice" data-char-id="${c.id}">试听</button>` : ''}
+          </div>
           <div class="ip-char-card-actions">
             <button type="button" class="ghost sm" data-action="regen" data-char-id="${c.id}">重新生成</button>
             <button type="button" class="ghost sm" data-action="upload" data-char-id="${c.id}">上传替换</button>
@@ -2349,12 +2365,132 @@
       };
     });
 
+    // Voice actions
+    container.querySelectorAll('[data-action="voice"]').forEach(btn => {
+      btn.onclick = () => showVoiceSelector(ip, btn.dataset.charId);
+    });
+    container.querySelectorAll('[data-action="preview-voice"]').forEach(btn => {
+      btn.onclick = async () => {
+        const charId = btn.dataset.charId;
+        btn.disabled = true; btn.textContent = '播放中…';
+        try {
+          const data = await api(`/api/ip/${ip.id}/character/${charId}/voice/preview`, {
+            method: 'POST', json: true, body: { text: '' },
+          });
+          if (data.audio_base64) {
+            const audio = new Audio('data:audio/wav;base64,' + data.audio_base64);
+            audio.play();
+            audio.onended = () => { btn.textContent = '试听'; btn.disabled = false; };
+          }
+        } catch (e) {
+          showToast('试听失败: ' + e.message);
+          btn.textContent = '试听'; btn.disabled = false;
+        }
+      };
+    });
+
     // Check if all images ready → unlock step 3
     const allReady = (ip.characters || []).length > 0 && ip.characters.every(c => c.reference_image_path);
     if (allReady) {
       const step3El = $('#ip-steps-bar [data-step="3"]');
       if (step3El) { step3El.classList.remove('disabled'); }
     }
+  }
+
+  async function showVoiceSelector(ip, charId) {
+    const presets = await loadVoicePresets();
+    const char = (ip.characters || []).find(c => c.id === charId);
+    if (!char) return;
+    const vp = char.voice_profile || {};
+
+    const overlay = document.createElement('div');
+    overlay.className = 'refine-popup';
+    overlay.style.display = 'flex';
+
+    let presetsHtml = '';
+    (presets || []).forEach(group => {
+      presetsHtml += `<div class="voice-group-label">${escapeHtml(group.category)}</div>`;
+      presetsHtml += '<div class="voice-grid">';
+      (group.voices || []).forEach(v => {
+        const sel = vp.preset_id === v.id ? ' selected' : '';
+        presetsHtml += `<div class="voice-chip${sel}" data-vid="${v.id}" data-vname="${escapeHtml(v.name_zh)}" title="${escapeHtml(v.description_zh)}">${escapeHtml(v.name_zh)}<br><small>${escapeHtml(v.description_zh)}</small></div>`;
+      });
+      presetsHtml += '</div>';
+    });
+
+    overlay.innerHTML = `
+      <div class="refine-popup-inner" style="max-width:560px;">
+        <h3>🎙 设置音色 — ${escapeHtml(char.name)}</h3>
+        <div style="margin-bottom:12px;">
+          <label><input type="radio" name="voice-mode-${charId}" value="preset" ${vp.mode !== 'clone' ? 'checked' : ''}> 预置音色</label>
+          <label style="margin-left:16px;"><input type="radio" name="voice-mode-${charId}" value="clone" ${vp.mode === 'clone' ? 'checked' : ''}> 上传克隆</label>
+        </div>
+        <div id="voice-preset-panel-${charId}">${presetsHtml}</div>
+        <div id="voice-clone-panel-${charId}" class="hidden" style="margin-top:8px;">
+          <p style="color:var(--muted);font-size:13px;">上传 3~10 秒清晰语音用于声音克隆。</p>
+          <input type="file" id="voice-clone-file-${charId}" accept="audio/*" />
+        </div>
+        <div class="flex" style="margin-top:16px;gap:8px;">
+          <button class="primary" id="voice-save-${charId}">保存</button>
+          <button class="ghost" id="voice-cancel-${charId}">取消</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    let selectedPresetId = vp.preset_id || '';
+    let selectedPresetName = vp.preset_name || '';
+
+    overlay.querySelectorAll('.voice-chip').forEach(chip => {
+      chip.onclick = () => {
+        overlay.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('selected'));
+        chip.classList.add('selected');
+        selectedPresetId = chip.dataset.vid;
+        selectedPresetName = chip.dataset.vname;
+      };
+    });
+
+    overlay.querySelectorAll(`[name="voice-mode-${charId}"]`).forEach(radio => {
+      radio.onchange = () => {
+        const mode = radio.value;
+        const presetPanel = overlay.querySelector(`#voice-preset-panel-${charId}`);
+        const clonePanel = overlay.querySelector(`#voice-clone-panel-${charId}`);
+        if (mode === 'preset') { presetPanel.classList.remove('hidden'); clonePanel.classList.add('hidden'); }
+        else { presetPanel.classList.add('hidden'); clonePanel.classList.remove('hidden'); }
+      };
+    });
+
+    overlay.querySelector(`#voice-cancel-${charId}`).onclick = () => overlay.remove();
+
+    overlay.querySelector(`#voice-save-${charId}`).onclick = async () => {
+      const mode = overlay.querySelector(`[name="voice-mode-${charId}"]:checked`).value;
+      if (mode === 'clone') {
+        const fileInput = overlay.querySelector(`#voice-clone-file-${charId}`);
+        if (fileInput.files && fileInput.files[0]) {
+          const fd = new FormData();
+          fd.append('file', fileInput.files[0]);
+          try {
+            const data = await api(`/api/ip/${ip.id}/character/${charId}/voice/upload`, { method: 'POST', body: fd });
+            showToast('参考音频已上传', 'success');
+            if (data.ip) { currentIPData = data.ip; renderCharCards(data.ip); }
+          } catch (e) { showToast('上传失败: ' + e.message); }
+        } else {
+          showToast('请选择音频文件');
+          return;
+        }
+      } else {
+        if (!selectedPresetId) { showToast('请选择一个预置音色'); return; }
+        try {
+          const data = await api(`/api/ip/${ip.id}/character/${charId}/voice`, {
+            method: 'PUT', json: true,
+            body: { mode: 'preset', preset_id: selectedPresetId, preset_name: selectedPresetName },
+          });
+          showToast('音色已设置', 'success');
+          if (data.ip) { currentIPData = data.ip; renderCharCards(data.ip); }
+        } catch (e) { showToast('设置失败: ' + e.message); }
+      }
+      overlay.remove();
+    };
   }
 
   // Generate all character images (async)
@@ -2583,6 +2719,7 @@
       const maxShots = parseInt(($('#ip-max-shots') || {}).value || '16');
       btn.disabled = true; btn.textContent = '生成中…';
       try {
+        const voiceMode = ($('#ip-voice-mode') || {}).value || 'native';
         const data = await api('/api/task/ip-theme', {
           method: 'POST', json: true,
           body: {
@@ -2592,6 +2729,7 @@
             max_shots: maxShots,
             generate_video: true,
             story_outline: ipStoryOutline,
+            voice_mode: voiceMode,
           },
         });
         showToast(`视频生成任务已创建: ${data.task_id}`, 'success');

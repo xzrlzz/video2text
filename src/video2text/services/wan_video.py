@@ -170,8 +170,14 @@ def submit_wan27_r2v(
     prompt_extend: bool | None = None,
     watermark: bool | None = None,
     size: str | None = None,
+    reference_voice_url: str | None = None,
+    audio: bool | None = None,
 ) -> str:
-    """wan2.7-r2v：input.media，顺序为先视频后图像（对应 视频1、视频2… 图1、图2…）。"""
+    """wan2.7-r2v：input.media，顺序为先视频后图像（对应 视频1、视频2… 图1、图2…）。
+
+    reference_voice_url: 角色参考音频 URL，用于在生成的视频中嵌入一致音色。
+    audio: 是否生成音频。False 时生成静音视频（供独立 TTS 管线使用）。
+    """
     if prompt_extend is None:
         prompt_extend = settings.video_prompt_extend
     if watermark is None:
@@ -188,6 +194,11 @@ def submit_wan27_r2v(
         local = normalize_local_reference_path(u.strip(), kind="image")
         _, url, cert = check_and_upload_local(model, local, api_key, cert)
         media.append({"type": "reference_image", "url": url})
+    if reference_voice_url:
+        s = reference_voice_url.strip()
+        if s:
+            _, url, cert = check_and_upload_local(model, s, api_key, cert)
+            media.append({"type": "reference_voice", "url": url})
     if not media:
         raise ValueError("wan2.7-r2v 需要至少 1 个参考图或参考视频")
 
@@ -195,16 +206,19 @@ def submit_wan27_r2v(
         size or settings.default_resolution
     )
     d = max(2, min(10, int(duration)))
+    params: dict[str, Any] = {
+        "resolution": resolution,
+        "ratio": ratio,
+        "duration": d,
+        "prompt_extend": prompt_extend,
+        "watermark": watermark,
+    }
+    if audio is not None:
+        params["audio"] = audio
     body: dict[str, Any] = {
         "model": model,
         "input": {"prompt": prompt, "media": media},
-        "parameters": {
-            "resolution": resolution,
-            "ratio": ratio,
-            "duration": d,
-            "prompt_extend": prompt_extend,
-            "watermark": watermark,
-        },
+        "parameters": params,
     }
     rsp = _post_json(video_synthesis_post_url(settings), api_key, body)
     tid = (rsp.get("output") or {}).get("task_id")
@@ -246,6 +260,8 @@ def generate_wan27_clip(
     *,
     reference_image_urls: list[str] | None = None,
     reference_video_urls: list[str] | None = None,
+    reference_voice_url: str | None = None,
+    audio: bool | None = None,
     prompt_extend: bool | None = None,
     watermark: bool | None = None,
     size: str | None = None,
@@ -254,7 +270,7 @@ def generate_wan27_clip(
     """提交并轮询，返回 video_url。"""
     ref_i = reference_image_urls or []
     ref_v = reference_video_urls or []
-    if ref_i or ref_v:
+    if ref_i or ref_v or reference_voice_url:
         tid = submit_wan27_r2v(
             settings,
             prompt,
@@ -264,6 +280,8 @@ def generate_wan27_clip(
             prompt_extend=prompt_extend,
             watermark=watermark,
             size=size,
+            reference_voice_url=reference_voice_url,
+            audio=audio,
         )
     else:
         tid = submit_wan27_t2v(

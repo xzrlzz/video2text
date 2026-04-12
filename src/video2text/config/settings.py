@@ -91,6 +91,9 @@ class Settings:
     video_watermark: bool = True
     video_prompt_extend: bool = True
     enforce_english_audio_text: bool = True
+    voice_mode: str = "native"          # "native" | "pipeline" | "silent"
+    tts_model: str = "cosyvoice-v3-flash"
+    tts_provider: str = "cosyvoice"     # "cosyvoice" | "fish_speech"
 
 
 SETTINGS_FIELDS: frozenset[str] = frozenset(
@@ -182,6 +185,9 @@ SETTINGS_ENV_MAP: dict[str, str] = {
     "video_watermark": "V2T_VIDEO_WATERMARK",
     "video_prompt_extend": "V2T_VIDEO_PROMPT_EXTEND",
     "enforce_english_audio_text": "V2T_ENFORCE_ENGLISH_AUDIO_TEXT",
+    "voice_mode": "V2T_VOICE_MODE",
+    "tts_model": "V2T_TTS_MODEL",
+    "tts_provider": "V2T_TTS_PROVIDER",
 }
 
 
@@ -475,6 +481,15 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         ),
         default=Settings.enforce_english_audio_text,
     )
+    voice_mode = str(
+        _env_or_file("V2T_VOICE_MODE", file_cfg, "voice_mode", Settings.voice_mode)
+    )
+    tts_model = str(
+        _env_or_file("V2T_TTS_MODEL", file_cfg, "tts_model", Settings.tts_model)
+    )
+    tts_provider = str(
+        _env_or_file("V2T_TTS_PROVIDER", file_cfg, "tts_provider", Settings.tts_provider)
+    )
 
     return Settings(
         dashscope_api_key=key,
@@ -500,6 +515,9 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         video_watermark=vid_watermark,
         video_prompt_extend=vid_prompt_ext,
         enforce_english_audio_text=enforce_en_audio,
+        voice_mode=voice_mode,
+        tts_model=tts_model,
+        tts_provider=tts_provider,
     )
 
 

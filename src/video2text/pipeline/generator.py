@@ -68,6 +68,8 @@ class WanClipTask:
     reference_video_urls: list[str]
     reference_video_descriptions: list[str]
     chunk_size: int
+    reference_voice_url: str = ""
+    audio: bool | None = None
 
 
 def generation_duration_cap(settings: Settings, has_refs: bool) -> int:
@@ -1210,6 +1212,42 @@ def preflight_ip_character_images(
     return result
 
 
+def preflight_ip_character_voices(
+    characters: list[IPCharacter],
+    settings: Settings,
+) -> dict[str, str]:
+    """上传角色参考音频到 OSS，返回 {char_id: voice_audio_url} 映射。
+
+    仅处理 voice_profile.mode == "clone" 且有本地参考音频的角色；
+    已有 URL 的或使用预置音色的跳过。
+    """
+    from dashscope.utils.oss_utils import check_and_upload_local
+
+    model = settings.video_ref_model
+    api_key = settings.dashscope_api_key
+    cert = None
+    result: dict[str, str] = {}
+
+    for char in characters:
+        vp = char.voice_profile
+        if not vp.is_configured:
+            continue
+        url = vp.reference_audio_url.strip()
+        if url:
+            result[char.id] = url
+            continue
+        path = vp.reference_audio_path.strip()
+        if not path:
+            continue
+        if path.startswith(("http://", "https://", "oss://")):
+            result[char.id] = path
+            continue
+        _, url, cert = check_and_upload_local(model, path, api_key, cert)
+        result[char.id] = url
+
+    return result
+
+
 def detect_characters_in_chunk(
     chunk: list[Shot],
     characters: list[IPCharacter],
@@ -1316,6 +1354,8 @@ def build_ip_wan_clip_tasks(
     char_url_map: dict[str, str],
     *,
     max_segment_seconds: float = 10.0,
+    voice_url_map: dict[str, str] | None = None,
+    voice_mode: str = "native",
     poll_callback: Callable[[str], None] | None = None,
 ) -> list[WanClipTask]:
     """构建 IP 模式的万相视频生成任务列表。
@@ -1325,6 +1365,8 @@ def build_ip_wan_clip_tasks(
     - 构建角色图 media 数组
     - 改写 prompt 为「图N」引用格式
     - 追加风格关键词
+    - voice_mode="native" 时传入角色参考音频（仅取每段的首个说话角色）
+    - voice_mode="pipeline" 时生成静音视频（audio=False）
     """
     shots = doc.shots
     if not shots:
@@ -1336,9 +1378,14 @@ def build_ip_wan_clip_tasks(
 
     characters = ip_profile.characters
     style_kw = ip_profile.visual_dna.style_keywords_en or ip_profile.visual_dna.style_keywords
+    voice_map = voice_url_map or {}
 
     cb = poll_callback or (lambda _: None)
     cb(f"IP 模式：{len(chunks)} 段，{len(characters)} 个角色，{len(char_url_map)} 张参考图已上传")
+    if voice_mode == "native" and voice_map:
+        cb(f"声音模式：原生音色（{len(voice_map)} 个角色有参考音频）")
+    elif voice_mode == "pipeline":
+        cb("声音模式：独立音频管线（生成静音视频）")
 
     tasks: list[WanClipTask] = []
     for i, chunk in enumerate(chunks):
@@ -1367,17 +1414,33 @@ def build_ip_wan_clip_tasks(
 
         prompt = rewrite_prompt_for_ip_refs(prompt, name_map, style_kw)
 
+        chunk_voice_url = ""
+        chunk_audio: bool | None = None
+        if voice_mode == "native" and voice_map and chunk_chars:
+            for cc in chunk_chars:
+                vu = voice_map.get(cc.id)
+                if vu:
+                    chunk_voice_url = vu
+                    break
+        elif voice_mode == "pipeline":
+            chunk_audio = False
+
         if poll_callback:
+            voice_info = ""
+            if chunk_voice_url:
+                voice_info = "，含参考音频"
+            elif chunk_audio is False:
+                voice_info = "，静音"
             if chunk_chars:
                 char_names = [c.name for c in chunk_chars[:5]]
                 poll_callback(
                     f"第 {i+1}/{len(chunks)} 段：{len(chunk)} 镜头，"
-                    f"角色 {char_names}，{len(ref_urls)} 张参考图"
+                    f"角色 {char_names}，{len(ref_urls)} 张参考图{voice_info}"
                 )
             else:
                 poll_callback(
                     f"第 {i+1}/{len(chunks)} 段：{len(chunk)} 镜头，"
-                    f"无角色参考（环境/物件镜头），走 t2v"
+                    f"无角色参考（环境/物件镜头），走 t2v{voice_info}"
                 )
 
         tasks.append(
@@ -1389,6 +1452,8 @@ def build_ip_wan_clip_tasks(
                 reference_video_urls=[],
                 reference_video_descriptions=[],
                 chunk_size=len(chunk),
+                reference_voice_url=chunk_voice_url,
+                audio=chunk_audio,
             )
         )
 
@@ -1408,25 +1473,36 @@ def run_ip_storyboard_generation(
     meta_update: Callable[[dict[str, Any]], None] | None = None,
     max_workers: int = 2,
     cancel_event: threading.Event | None = None,
+    voice_mode: str | None = None,
 ) -> Path:
     """IP 模式视频生成的完整管线。
 
-    1. 预上传角色参考图
+    1. 预上传角色参考图（+ 参考音频）
     2. 构建 IP 模式任务列表
     3. 并发生成各段视频
     4. 拼接成片
     """
     cb = progress_cb or (lambda _: None)
+    effective_voice_mode = voice_mode or settings.voice_mode
 
     # 预上传角色图
     cb("正在上传角色参考图…")
     char_url_map = preflight_ip_character_images(ip_profile.characters, settings)
     cb(f"已上传 {len(char_url_map)} 张角色参考图")
 
+    # 预上传角色参考音频（native 模式 + 有克隆音频时）
+    voice_url_map: dict[str, str] = {}
+    if effective_voice_mode == "native":
+        voice_url_map = preflight_ip_character_voices(ip_profile.characters, settings)
+        if voice_url_map:
+            cb(f"已上传 {len(voice_url_map)} 个角色参考音频")
+
     # 构建任务
     tasks = build_ip_wan_clip_tasks(
         doc, ip_profile, settings, char_url_map,
         max_segment_seconds=max_segment_seconds,
+        voice_url_map=voice_url_map,
+        voice_mode=effective_voice_mode,
         poll_callback=cb,
     )
 
@@ -1465,14 +1541,28 @@ def run_ip_storyboard_generation(
         if cancel_event and cancel_event.is_set():
             raise CancellationError("用户取消了任务")
         cb(f"IP 生成第 {t.index+1}/{len(tasks)} 段（约 {t.duration}s，{t.chunk_size} 镜）")
-        url = generate_video_clip(
-            t.prompt,
-            t.duration,
-            settings,
-            size=size,
-            poll_callback=None,
-            reference_urls=t.reference_urls or None,
-        )
+
+        ref_u = t.reference_urls or None
+        voice_u = t.reference_voice_url or None
+        if ref_u or voice_u:
+            url = generate_wan27_clip(
+                settings,
+                t.prompt,
+                t.duration,
+                reference_image_urls=ref_u,
+                reference_voice_url=voice_u,
+                audio=t.audio,
+                size=size,
+                poll_callback=None,
+            )
+        else:
+            url = generate_video_clip(
+                t.prompt,
+                t.duration,
+                settings,
+                size=size,
+                poll_callback=None,
+            )
         seg_path = segments_dir / f"seg_{t.index:03d}.mp4"
         download_url(url, seg_path)
         with _meta_lock:
@@ -1497,9 +1587,39 @@ def run_ip_storyboard_generation(
         )
 
     cb("正在拼接最终视频…")
+    silent_mp4 = output_mp4.with_suffix(".silent.mp4") if effective_voice_mode == "pipeline" else output_mp4
     try:
-        concat_videos_ffmpeg(valid_paths, output_mp4)
+        concat_videos_ffmpeg(valid_paths, silent_mp4)
     except subprocess.CalledProcessError:
-        reencode_concat(valid_paths, output_mp4)
-    cb(f"完成：{output_mp4.name}")
+        reencode_concat(valid_paths, silent_mp4)
+
+    # Mode B：独立音频管线 — 生成 TTS 音频并合并
+    if effective_voice_mode == "pipeline":
+        try:
+            cb("声音管线：生成 TTS 音频…")
+            from video2text.pipeline.audio_align import build_chunk_audio
+            from video2text.pipeline.composer import merge_audio_video
+
+            chunk_result = build_chunk_audio(
+                doc.shots, ip_profile, settings,
+                progress_cb=cb,
+            )
+
+            audio_path = segments_dir / "tts_audio.wav"
+            audio_path.write_bytes(chunk_result.audio_data)
+            cb(f"TTS 音频已生成（{chunk_result.duration_ms}ms）")
+
+            cb("合并音视频…")
+            merge_audio_video(silent_mp4, audio_path, output_mp4, replace_audio=True)
+            silent_mp4.unlink(missing_ok=True)
+            cb(f"完成：{output_mp4.name}（含 TTS 音频）")
+        except Exception as e:
+            log.warning("声音管线失败，使用静音视频: %s", e)
+            cb(f"声音管线异常（{e}），使用静音视频")
+            if silent_mp4 != output_mp4:
+                shutil.copy2(silent_mp4, output_mp4)
+                silent_mp4.unlink(missing_ok=True)
+    else:
+        cb(f"完成：{output_mp4.name}")
+
     return output_mp4

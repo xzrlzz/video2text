@@ -164,6 +164,14 @@
         <div class="ip-step-content hidden" id="ip-step-5">
           <div class="row">
             <div>
+              <label>声音模式</label>
+              <select id="ip-voice-mode">
+                <option value="native">原生音色（wan2.7 内置）</option>
+                <option value="pipeline">独立配音（TTS + 合并）</option>
+                <option value="silent">静音视频</option>
+              </select>
+            </div>
+            <div>
               <label>并发数</label>
               <input type="number" id="ip-max-workers" value="4" min="1" max="8" />
             </div>

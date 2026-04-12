@@ -809,6 +809,52 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
 }
 .ip-char-card-actions button { font-size: 11px; padding: 4px 10px; }
 
+.ip-char-card-voice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 4px 0;
+}
+.ip-char-card-voice .voice-label {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.ip-char-card-voice button { font-size: 11px; padding: 3px 8px; }
+
+.voice-group-label {
+  font-weight: 600;
+  font-size: 13px;
+  margin: 12px 0 6px;
+  color: var(--fg);
+}
+.voice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+}
+.voice-chip {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: center;
+  background: var(--surface);
+  transition: border-color 0.15s, background 0.15s;
+}
+.voice-chip:hover { border-color: var(--primary); background: var(--surface2); }
+.voice-chip.selected {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  font-weight: 600;
+}
+.voice-chip small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+
 /* ── IP Story Preview ── */
 .ip-story-card {
   background: var(--surface2);

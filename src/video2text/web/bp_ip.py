@@ -29,6 +29,7 @@ from video2text.core.ip_manager import (
     update_character_reference_in_profile,
 )
 from video2text.core.styles import get_all_style_presets, get_style_by_id, search_styles
+from video2text.core.voices import get_all_voice_presets, get_voice_by_id, search_voices
 from video2text.core.theme import (
     generate_ip_story_outline,
     generate_storyboard_from_ip,
@@ -87,6 +88,26 @@ def api_style_detail(style_id: str):
     if not style:
         return jsonify({"error": "风格不存在"}), 404
     return jsonify(style)
+
+
+# ---------------------------------------------------------------------------
+# 音色预设
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/voices")
+def api_voices():
+    q = request.args.get("q", "").strip()
+    if q:
+        return jsonify(search_voices(q))
+    return jsonify(get_all_voice_presets())
+
+
+@bp.route("/api/voices/<voice_id>")
+def api_voice_detail(voice_id: str):
+    v = get_voice_by_id(voice_id)
+    if not v:
+        return jsonify({"error": "音色不存在"}), 404
+    return jsonify(v.to_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +347,94 @@ def api_upload_character_image(ip_id: str, char_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 角色音色管理
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/ip/<ip_id>/character/<char_id>/voice", methods=["PUT"])
+def api_set_character_voice(ip_id: str, char_id: str):
+    """设置角色音色（预置或克隆模式）。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    char = ip.get_character(char_id)
+    if not char:
+        return jsonify({"error": "角色不存在"}), 404
+    data = request.json or {}
+    from video2text.core.ip_manager import VoiceProfile
+    vp = VoiceProfile.from_dict({**char.voice_profile.to_dict(), **data})
+    char.voice_profile = vp
+    save_ip(user, ip)
+    return jsonify({"ip": ip.to_dict()})
+
+
+@bp.route("/api/ip/<ip_id>/character/<char_id>/voice/upload", methods=["POST"])
+def api_upload_character_voice(ip_id: str, char_id: str):
+    """上传角色参考音频（用于声音克隆或 wan2.7 reference_voice）。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    char = ip.get_character(char_id)
+    if not char:
+        return jsonify({"error": "角色不存在"}), 404
+    if "file" not in request.files:
+        return jsonify({"error": "缺少音频文件"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "文件名为空"}), 400
+
+    from video2text.core.ip_manager import VoiceProfile, get_character_voice_path
+    dest = get_character_voice_path(user, ip_id, char_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    f.save(str(dest))
+
+    char.voice_profile = VoiceProfile(
+        mode="clone",
+        reference_audio_path=str(dest),
+        provider=char.voice_profile.provider or "cosyvoice",
+    )
+    save_ip(user, ip)
+    return jsonify({"ip": ip.to_dict()})
+
+
+@bp.route("/api/ip/<ip_id>/character/<char_id>/voice/preview", methods=["POST"])
+def api_preview_character_voice(ip_id: str, char_id: str):
+    """试听：用角色音色 TTS 一句话，返回音频 URL 或 base64。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    char = ip.get_character(char_id)
+    if not char:
+        return jsonify({"error": "角色不存在"}), 404
+    if not char.voice_profile.is_configured:
+        return jsonify({"error": "该角色尚未设置音色"}), 400
+    data = request.json or {}
+    text = data.get("text", "").strip()
+    if not text:
+        text = f"你好，我是{char.name}。"
+    try:
+        settings = _deps["load_settings_for_user"](user)
+        from video2text.services.tts import get_tts_provider
+        provider = get_tts_provider(settings)
+        result = provider.synthesize(
+            text=text,
+            voice_id=char.voice_profile.effective_voice_id,
+            model=settings.tts_model,
+        )
+        import base64
+        audio_b64 = base64.b64encode(result.audio_data).decode("ascii")
+        return jsonify({
+            "audio_base64": audio_b64,
+            "format": result.audio_format,
+            "duration_ms": result.duration_ms,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # IP 故事大纲生成（独立于分镜）
 # ---------------------------------------------------------------------------
 
@@ -424,6 +533,7 @@ def api_task_ip_theme():
     max_shots = int(data.get("max_shots", 16))
     generate_video = data.get("generate_video", True)
     story_outline = data.get("story_outline")
+    voice_mode = data.get("voice_mode", "")
 
     task_id = uuid.uuid4().hex[:16]
     _deps["ensure_workspace"](user)
@@ -478,6 +588,7 @@ def api_task_ip_theme():
                     progress_cb=lambda m: _deps["sse_push"](tid, m),
                     meta_update=lambda d: _deps["update_task_meta"](td, d),
                     cancel_event=_deps["cancel_flags"].get(tid),
+                    voice_mode=params.get("voice_mode") or None,
                 )
                 _deps["update_task_meta"](td, {"status": "done"})
                 _deps["sse_push"](tid, "IP 视频生成完成！")
@@ -509,6 +620,7 @@ def api_task_ip_theme():
         "max_shots": max_shots,
         "generate_video": generate_video,
         "story_outline": story_outline,
+        "voice_mode": voice_mode,
     }
     if not _deps["spawn"]("ip-theme", _run_ip_theme_job, task_id, ip_params):
         return (
