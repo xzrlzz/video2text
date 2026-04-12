@@ -193,14 +193,14 @@ def build_wan_clip_tasks(
             sv, si = list(range(n_v)), list(range(n_i))
             sb = subject_block
 
-        matched_pool: list[CharacterPoolEntry] | None = None
+        char_block = ""
         if pool:
-            matched_chars = match_characters_for_chunk(chunk, pool, settings)
-            matched_pool = matched_chars if matched_chars else None
+            matched = match_characters_for_chunk(chunk, pool, settings)
+            char_block = format_character_pool_block(matched)
 
         prompt, dur = build_wan_multi_shot_prompt(
             chunk, style, sb, max_duration=dur_cap,
-            character_pool=matched_pool,
+            character_block=char_block,
         )
         cu = [ref_u[j] for j in si]
         cv = [ref_v[j] for j in sv]
@@ -643,62 +643,16 @@ def _allocate_lens_seconds(
     return alloc
 
 
-def _match_characters_for_shot(
-    shot: Shot, pool: list[CharacterPoolEntry]
-) -> list[CharacterPoolEntry]:
-    """Match characters from the pool that appear in a single shot."""
-    if not pool:
-        return []
-
-    matched: list[CharacterPoolEntry] = []
-    seen: set[int] = set()
-
-    if shot.characters_in_shot:
-        for i, entry in enumerate(pool):
-            en = entry.name.strip().lower()
-            for name in shot.characters_in_shot:
-                if en in name.lower() or name.lower() in en:
-                    if i not in seen:
-                        matched.append(entry)
-                        seen.add(i)
-        if matched:
-            return matched
-
-    blob = " ".join(
-        f for f in (
-            shot.generation_prompt, shot.scene_description,
-            shot.character_action, shot.dialogue,
-        ) if f and f.strip()
-    ).lower()
-    for i, entry in enumerate(pool):
-        if len(entry.name) >= 2 and entry.name.lower() in blob and i not in seen:
-            matched.append(entry)
-            seen.add(i)
-    return matched
-
-
-def _condense_description(desc: str, max_words: int = 30) -> str:
-    """Condense a character description to key visual attributes for prompt injection."""
-    if not desc:
-        return ""
-    words = desc.split()
-    if len(words) <= max_words:
-        return desc
-    return " ".join(words[:max_words])
-
-
 def build_wan_multi_shot_prompt(
     chunk: list[Shot],
     style: str,
     subject_block: str = "",
     max_duration: int = 15,
     character_block: str = "",
-    character_pool: list[CharacterPoolEntry] | None = None,
 ) -> tuple[str, int]:
     """
     构建万相多镜头 prompt。
-    当 character_pool 存在时，角色描述按镜头注入（而非全局前缀），
-    使主体描述和分镜运镜各占约一半比例，减少冗余。
+    结构：[角色描述] [主体声明] [风格] [第N个镜头 generation_prompt。对白：xxx]
     """
     target = _chunk_target_duration(chunk, max_duration)
     target = max(target, len(chunk))
@@ -708,7 +662,7 @@ def build_wan_multi_shot_prompt(
         raise ValueError("lens allocation mismatch")
 
     prefix_parts: list[str] = []
-    if not character_pool and character_block.strip():
+    if character_block.strip():
         prefix_parts.append(character_block.strip())
     if subject_block.strip():
         prefix_parts.append(subject_block.strip())
@@ -730,17 +684,7 @@ def build_wan_multi_shot_prompt(
             ]
             visual = ", ".join(fallback_parts) if fallback_parts else shot.shot_type or "scene"
 
-        char_prefix = ""
-        if character_pool:
-            shot_chars = _match_characters_for_shot(shot, character_pool)
-            if shot_chars:
-                descs = [
-                    f"{e.name}: {_condense_description(e.description)}"
-                    for e in shot_chars
-                ]
-                char_prefix = "[" + "; ".join(descs) + "] "
-
-        seg_text = f"Shot {len(segs)+1} [{t0}-{t1}s]: {char_prefix}{visual}"
+        seg_text = f"Shot {len(segs)+1} [{t0}-{t1}s]: {visual}"
         if shot.dialogue and shot.dialogue.strip():
             seg_text += f" | dialogue: {shot.dialogue.strip()}"
         ambient = getattr(shot, "ambient_sound", "") or ""
@@ -759,7 +703,6 @@ def build_wan_multi_shot_prompt(
     if neg_hints:
         combined_neg = ", ".join(dict.fromkeys(neg_hints))
         prompt += f" Avoid unwanted elements: {combined_neg}."
-
 
     return prompt, target
 
@@ -787,13 +730,13 @@ def assign_generation_prompts(
         2.0, min(float(max_segment_seconds), float(api_duration_cap))
     )
     for chunk in chunk_shots_by_max_duration(shots, chunk_max):
-        matched_pool: list[CharacterPoolEntry] | None = None
+        char_block = ""
         if pool:
-            matched_chars = match_characters_for_chunk(chunk, pool, settings)
-            matched_pool = matched_chars if matched_chars else None
+            matched = match_characters_for_chunk(chunk, pool, settings)
+            char_block = format_character_pool_block(matched)
         prompt, _ = build_wan_multi_shot_prompt(
             chunk, style, block, max_duration=api_duration_cap,
-            character_pool=matched_pool,
+            character_block=char_block,
         )
         for s in chunk:
             if not s.generation_prompt.strip():

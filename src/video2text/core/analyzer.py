@@ -464,14 +464,14 @@ def _synopsis_from_global_summary(gs: Any) -> str:
         return ""
     parts: list[str] = []
     mapping = (
-        ("core_atmosphere", "Core atmosphere"),
-        ("color_palette", "Color palette"),
-        ("editing_pace", "Editing pace"),
+        ("core_atmosphere", "核心氛围"),
+        ("color_palette", "色彩基调"),
+        ("editing_pace", "剪辑节奏"),
     )
     for key, label in mapping:
         v = gs.get(key)
         if v is not None and str(v).strip():
-            parts.append(f"{label}: {str(v).strip()}")
+            parts.append(f"{label}：{str(v).strip()}")
     return "\n".join(parts)
 
 
@@ -637,7 +637,7 @@ def analyze_scene_segments(
     first_global_summary: dict[str, Any] | None = None
     hint = style_hint.strip()
     if hint:
-        hint = f"\nAdaptation / unified style note: {hint}"
+        hint = f" 改编/统一风格要求：{hint}"
 
     for seg in segments:
         if not seg.clip_path or not seg.clip_path.exists():
@@ -772,12 +772,18 @@ def _full_video_user_text(style_hint: str) -> str:
     hint = f"\n{style_hint}" if style_hint else ""
     return (
         f"{USER_ANALYSIS_PROMPT}\n"
-        "Watch the entire reference video carefully. Besides global_summary and shots, for each shot "
-        "prefer supplying approx_start_sec and approx_end_sec on the source timeline (float seconds from 0). "
-        "If timing is uncertain, use duration_sec for that shot and the system will infer.\n"
-        "Field dialogue must match lip-sync and audio; spoken words only — no speaker names, emotion tags, "
-        "narration, or SFX notes. Preserve the original spoken language of the source; do not translate dialogue.\n"
-        "Output JSON only."
+        "请完整观看整支参考视频。\n"
+        "【最高优先级】仔细听取音频轨道中的所有对话内容，逐句转录到每个镜头的 dialogue 字段中。"
+        "【绝对要求】所有 dialogue 必须是英文！如果原片语言是中文或其他非英语语言，"
+        "必须翻译为自然流畅的英文，保留原意和语气，可以略作修辞润色但核心意思不能变。"
+        "禁止在 dialogue 字段中出现任何中文或其他非英文字符！"
+        "角色嘴唇在动就一定有对白，不可留空。\n"
+        "除 global_summary 与 shots 外，每个镜头尽量给出在原片时间轴上的 "
+        "approx_start_sec 与 approx_end_sec（浮点秒，从 0 起算）。若无法精确，可用 duration_sec "
+        "表示该镜时长并由系统推算。\n"
+        "角色动作描述必须包含微表情和肢体语言细节。\n"
+        "【重要提醒】JSON 中所有文本字段必须为英文，不允许出现任何中文字符。dialogue 字段尤其重要，必须是英文。\n"
+        "只输出 JSON。"
         f"{hint}"
     )
 
