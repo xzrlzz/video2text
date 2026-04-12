@@ -131,10 +131,14 @@ def submit_wan27_t2v(
     settings: Settings,
     prompt: str,
     duration: int,
-    prompt_extend: bool = True,
-    watermark: bool = True,
+    prompt_extend: bool | None = None,
+    watermark: bool | None = None,
     size: str | None = None,
 ) -> str:
+    if prompt_extend is None:
+        prompt_extend = settings.video_prompt_extend
+    if watermark is None:
+        watermark = settings.video_watermark
     resolution, ratio = parse_size_to_wan27_resolution_and_ratio(
         size or settings.default_resolution
     )
@@ -163,11 +167,15 @@ def submit_wan27_r2v(
     reference_image_urls: list[str],
     reference_video_urls: list[str],
     duration: int,
-    prompt_extend: bool = True,
-    watermark: bool = True,
+    prompt_extend: bool | None = None,
+    watermark: bool | None = None,
     size: str | None = None,
 ) -> str:
     """wan2.7-r2v：input.media，顺序为先视频后图像（对应 视频1、视频2… 图1、图2…）。"""
+    if prompt_extend is None:
+        prompt_extend = settings.video_prompt_extend
+    if watermark is None:
+        watermark = settings.video_watermark
     model = settings.video_ref_model
     api_key = settings.dashscope_api_key
     media: list[dict[str, str]] = []
@@ -238,8 +246,8 @@ def generate_wan27_clip(
     *,
     reference_image_urls: list[str] | None = None,
     reference_video_urls: list[str] | None = None,
-    prompt_extend: bool = True,
-    watermark: bool = True,
+    prompt_extend: bool | None = None,
+    watermark: bool | None = None,
     size: str | None = None,
     poll_callback: Callable[[str], None] | None = None,
 ) -> str:

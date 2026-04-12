@@ -300,6 +300,14 @@
     <label class="switch" style="margin-top:8px;">
       <input type="checkbox" id="cfg-chunk-ref-filter" checked /> per_chunk_reference_filter（多参考时按分镜自动选本段参考，减少串角）
     </label>
+    <label style="margin-top:12px;">max_workers <span style="font-weight:normal;color:var(--muted);font-size:11px;">（视频生成并发数）</span></label>
+    <input type="number" id="cfg-max-workers" step="1" min="1" max="16" />
+    <label class="switch" style="margin-top:8px;">
+      <input type="checkbox" id="cfg-video-watermark" checked /> video_watermark（视频添加水印）
+    </label>
+    <label class="switch" style="margin-top:8px;">
+      <input type="checkbox" id="cfg-video-prompt-extend" checked /> video_prompt_extend（视频生成时自动扩展提示词）
+    </label>
     <div class="flex" style="margin-top:20px;">
       <button type="button" class="primary" id="btn-save-config">保存配置</button>
       <button type="button" class="ghost" id="btn-close-settings">关闭</button>

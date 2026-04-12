@@ -17,5 +17,8 @@
   "max_segment_seconds": 15,
   "require_reference": true,
   "per_chunk_reference_filter": true,
-  "task_ttl_days": 7
+  "task_ttl_days": 7,
+  "max_workers": 4,
+  "video_watermark": true,
+  "video_prompt_extend": true
 }

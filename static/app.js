@@ -1723,12 +1723,17 @@
       set('img-model', c.image_gen_model);
       set('img-size', c.image_gen_size);
       set('ttl', c.task_ttl_days ?? 7);
+      set('max-workers', c.max_workers ?? 4);
       $('#cfg-key').value = c.dashscope_api_key || '';
       const imgThink = $('#cfg-img-thinking');
       if (imgThink) imgThink.checked = c.image_gen_thinking_mode !== false;
       $('#cfg-req-ref').checked = !!c.require_reference;
       const crf = $('#cfg-chunk-ref-filter');
       if (crf) crf.checked = c.per_chunk_reference_filter !== false;
+      const vwm = $('#cfg-video-watermark');
+      if (vwm) vwm.checked = c.video_watermark !== false;
+      const vpe = $('#cfg-video-prompt-extend');
+      if (vpe) vpe.checked = c.video_prompt_extend !== false;
     } catch (e) {
       showToast('加载配置失败：' + e.message, 'warning', 4000);
     }
@@ -1759,8 +1764,11 @@
         image_gen_thinking_mode: $('#cfg-img-thinking') ? $('#cfg-img-thinking').checked : true,
         image_gen_size: ($('#cfg-img-size') || {}).value ? $('#cfg-img-size').value.trim() : '2K',
         task_ttl_days: parseInt($('#cfg-ttl').value) || 7,
+        max_workers: parseInt($('#cfg-max-workers').value) || 4,
         require_reference: $('#cfg-req-ref').checked,
         per_chunk_reference_filter: $('#cfg-chunk-ref-filter').checked,
+        video_watermark: $('#cfg-video-watermark') ? $('#cfg-video-watermark').checked : true,
+        video_prompt_extend: $('#cfg-video-prompt-extend') ? $('#cfg-video-prompt-extend').checked : true,
       };
       const k = $('#cfg-key').value.trim();
       if (k) body.dashscope_api_key = k;

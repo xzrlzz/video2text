@@ -669,7 +669,7 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         meta_style = str(_read_task_meta(task_id).get("style") or "")
         style = str(params.get("style") or meta_style or "")
         resolution = params.get("resolution") or None
-        max_workers = int(params.get("max_workers") or 4)
+        max_workers = int(params.get("max_workers") or settings.max_workers)
 
         has_refs = bool(ref_images or ref_videos)
         dur_cap = generation_duration_cap(settings, has_refs)
@@ -1010,7 +1010,7 @@ def api_task_run():
                 "style": p.get("style") or "",
                 "resolution": p.get("resolution"),
                 "max_segment_seconds": p.get("max_segment_seconds"),
-                "max_workers": p.get("max_workers") or 4,
+                "max_workers": p.get("max_workers"),
             }
             _run_generate_job(tid, gen_params)
         except Exception as e:
@@ -1405,7 +1405,7 @@ def api_workspace_resume(task_id: str):
         "style": body.get("style") or "",
         "resolution": body.get("resolution"),
         "max_segment_seconds": body.get("max_segment_seconds"),
-        "max_workers": body.get("max_workers") or 4,
+        "max_workers": body.get("max_workers"),
     }
     _write_task_meta(task_id, {"status": "queued_generate", "params_resume": merged})
     if not _spawn("resume", _run_generate_job, task_id, merged):

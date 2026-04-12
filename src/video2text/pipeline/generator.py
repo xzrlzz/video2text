@@ -805,7 +805,7 @@ def generate_video_clip(
     duration: int,
     settings: Settings,
     size: str | None = None,
-    watermark: bool = True,
+    watermark: bool | None = None,
     poll_callback: Callable[[str], None] | None = None,
     reference_urls: list[str] | None = None,
     reference_video_urls: list[str] | None = None,
@@ -817,6 +817,8 @@ def generate_video_clip(
     """
     dashscope.base_http_api_url = settings.dashscope_api_base
     api_key = settings.dashscope_api_key
+    if watermark is None:
+        watermark = settings.video_watermark
 
     ref_u = [u for u in (reference_urls or []) if u and str(u).strip()]
     ref_v = [u for u in (reference_video_urls or []) if u and str(u).strip()]
@@ -857,7 +859,7 @@ def generate_video_clip(
         size=size_eff,
         duration=duration,
         shot_type="multi",
-        prompt_extend=True,
+        prompt_extend=settings.video_prompt_extend,
         watermark=watermark,
     )
     if ref_u:

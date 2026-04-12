@@ -87,6 +87,9 @@ class Settings:
     require_reference: bool = True
     per_chunk_reference_filter: bool = True
     task_ttl_days: int = 7
+    max_workers: int = 4
+    video_watermark: bool = True
+    video_prompt_extend: bool = True
 
 
 SETTINGS_FIELDS: frozenset[str] = frozenset(
@@ -237,6 +240,17 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
     ttl = _env_or_file(
         "V2T_TASK_TTL_DAYS", file_cfg, "task_ttl_days", Settings.task_ttl_days
     )
+    workers_raw = _env_or_file(
+        "V2T_MAX_WORKERS", file_cfg, "max_workers", Settings.max_workers
+    )
+    vid_watermark = _as_bool(
+        _env_or_file("V2T_VIDEO_WATERMARK", file_cfg, "video_watermark", None),
+        default=Settings.video_watermark,
+    )
+    vid_prompt_ext = _as_bool(
+        _env_or_file("V2T_VIDEO_PROMPT_EXTEND", file_cfg, "video_prompt_extend", None),
+        default=Settings.video_prompt_extend,
+    )
 
     return Settings(
         dashscope_api_key=key,
@@ -258,6 +272,9 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         require_reference=req_ref,
         per_chunk_reference_filter=chunk_filter,
         task_ttl_days=int(ttl) if ttl is not None else Settings.task_ttl_days,
+        max_workers=max(1, int(workers_raw)) if workers_raw is not None else Settings.max_workers,
+        video_watermark=vid_watermark,
+        video_prompt_extend=vid_prompt_ext,
     )
 
 
