@@ -90,6 +90,7 @@ class Settings:
     max_workers: int = 4
     video_watermark: bool = True
     video_prompt_extend: bool = True
+    enforce_english_audio_text: bool = True
 
 
 SETTINGS_FIELDS: frozenset[str] = frozenset(
@@ -118,6 +119,7 @@ SYSTEM_ONLY_FIELDS: frozenset[str] = frozenset(
         "max_workers",
         "video_watermark",
         "video_prompt_extend",
+        "enforce_english_audio_text",
     }
 )
 
@@ -179,6 +181,7 @@ SETTINGS_ENV_MAP: dict[str, str] = {
     "max_workers": "V2T_MAX_WORKERS",
     "video_watermark": "V2T_VIDEO_WATERMARK",
     "video_prompt_extend": "V2T_VIDEO_PROMPT_EXTEND",
+    "enforce_english_audio_text": "V2T_ENFORCE_ENGLISH_AUDIO_TEXT",
 }
 
 
@@ -463,6 +466,15 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         _env_or_file("V2T_VIDEO_PROMPT_EXTEND", file_cfg, "video_prompt_extend", None),
         default=Settings.video_prompt_extend,
     )
+    enforce_en_audio = _as_bool(
+        _env_or_file(
+            "V2T_ENFORCE_ENGLISH_AUDIO_TEXT",
+            file_cfg,
+            "enforce_english_audio_text",
+            None,
+        ),
+        default=Settings.enforce_english_audio_text,
+    )
 
     return Settings(
         dashscope_api_key=key,
@@ -487,6 +499,7 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         max_workers=max(1, int(workers_raw)) if workers_raw is not None else Settings.max_workers,
         video_watermark=vid_watermark,
         video_prompt_extend=vid_prompt_ext,
+        enforce_english_audio_text=enforce_en_audio,
     )
 
 

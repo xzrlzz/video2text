@@ -20,6 +20,12 @@ pip install -e .
 
 `pip install -e .` 会注册命令行入口 **`v2t`**（CLI）与 **`v2t-web`**（Web UI），并把 `video2text` 包装到当前环境。
 
+如需开启集中可观测（OTel Trace 等），可选安装：
+
+```bash
+pip install -r requirements-observability.txt
+```
+
 若你使用 **Miniconda/Anaconda**，可激活已有环境（例如名为 **`video`** 的环境）后同样执行 `pip install -r requirements.txt` 与 `pip install -e .`。运行测试示例：
 
 ```bash
@@ -106,7 +112,15 @@ v2t-web
 # 等价于 python -m video2text.web.app
 ```
 
-浏览器打开 **http://127.0.0.1:5000**。在「设置」中填写/保存 API Key 与模型；「新建任务」后按步骤操作。生成中断后同一任务可再点「开始/继续生成」复用已下载的片段缓存。
+浏览器打开 **http://127.0.0.1:8000**。在「设置」中填写/保存 API Key 与模型；「新建任务」后按步骤操作。生成中断后同一任务可再点「开始/继续生成」复用已下载的片段缓存。
+
+## 可观测（日志/指标/追踪）
+
+- 结构化日志：默认输出 JSON 到 stdout。
+- 探活与指标：
+  - `GET /health`
+  - `GET /metrics`
+- 详细接入说明见 [`docs/observability.md`](docs/observability.md)。
 
 ## 用法
 

@@ -51,6 +51,11 @@ _VAGUE_ROLE_BODY_MARKERS = (
     "待定",
 )
 
+_ENGLISH_AUDIO_TEXT_GUARD = (
+    "All dialogue, voice-over, narration, and spoken lines must be in natural English only. "
+    "Do not use Chinese or other non-English languages."
+)
+
 
 @dataclass(frozen=True)
 class WanClipTask:
@@ -201,6 +206,7 @@ def build_wan_clip_tasks(
         prompt, dur = build_wan_multi_shot_prompt(
             chunk, style, sb, max_duration=dur_cap,
             character_block=char_block,
+            enforce_english_audio_text=settings.enforce_english_audio_text,
         )
         cu = [ref_u[j] for j in si]
         cv = [ref_v[j] for j in sv]
@@ -649,6 +655,7 @@ def build_wan_multi_shot_prompt(
     subject_block: str = "",
     max_duration: int = 15,
     character_block: str = "",
+    enforce_english_audio_text: bool = True,
 ) -> tuple[str, int]:
     """
     构建万相多镜头 prompt。
@@ -704,6 +711,9 @@ def build_wan_multi_shot_prompt(
         combined_neg = ", ".join(dict.fromkeys(neg_hints))
         prompt += f" Avoid unwanted elements: {combined_neg}."
 
+    if enforce_english_audio_text:
+        prompt += f" {_ENGLISH_AUDIO_TEXT_GUARD}"
+
     return prompt, target
 
 
@@ -737,6 +747,9 @@ def assign_generation_prompts(
         prompt, _ = build_wan_multi_shot_prompt(
             chunk, style, block, max_duration=api_duration_cap,
             character_block=char_block,
+            enforce_english_audio_text=(
+                settings.enforce_english_audio_text if settings else True
+            ),
         )
         for s in chunk:
             if not s.generation_prompt.strip():
@@ -1349,6 +1362,7 @@ def build_ip_wan_clip_tasks(
 
         prompt, dur = build_wan_multi_shot_prompt(
             chunk, "", ref_hint, max_duration=dur_cap,
+            enforce_english_audio_text=settings.enforce_english_audio_text,
         )
 
         prompt = rewrite_prompt_for_ip_refs(prompt, name_map, style_kw)

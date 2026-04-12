@@ -1,0 +1,57 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "video2text-web"
+          scrape_interval: 15s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["127.0.0.1:8000"]
+              labels:
+                service: "video2text-web"
+  # 如果你将应用日志重定向到文件，可启用 filelog 采集。
+  # filelog:
+  #   include:
+  #     - /var/log/video2text/app.log
+  #   start_at: beginning
+
+processors:
+  batch:
+  resource:
+    attributes:
+      - key: service.name
+        value: video2text-web
+        action: upsert
+
+exporters:
+  # 调试用：开发环境先看 collector 是否收到数据。
+  debug:
+    verbosity: basic
+  # 生产环境通常对接你的统一可观测后端。
+  # 可为 traces/metrics/logs 分别使用不同 endpoint。
+  otlphttp/traces:
+    endpoint: ${OTEL_TRACES_ENDPOINT}
+  otlphttp/metrics:
+    endpoint: ${OTEL_METRICS_ENDPOINT}
+  # otlphttp/logs:
+  #   endpoint: ${OTEL_LOGS_ENDPOINT}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [otlphttp/traces, debug]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [resource, batch]
+      exporters: [otlphttp/metrics, debug]
+    # 如启用 filelog + 日志后端再打开。
+    # logs:
+    #   receivers: [filelog, otlp]
+    #   processors: [resource, batch]
+    #   exporters: [otlphttp/logs, debug]

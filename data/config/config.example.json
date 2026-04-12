@@ -20,5 +20,6 @@
   "task_ttl_days": 7,
   "max_workers": 4,
   "video_watermark": true,
-  "video_prompt_extend": true
+  "video_prompt_extend": true,
+  "enforce_english_audio_text": true
 }

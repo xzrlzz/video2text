@@ -126,7 +126,7 @@ def init_auth(app: Any, users_file: Path | None = None) -> None:
 
     @app.before_request
     def _check_auth():
-        allowed_prefixes = ("/auth/", "/static/")
+        allowed_prefixes = ("/auth/", "/static/", "/health", "/metrics")
         if any(request.path.startswith(p) for p in allowed_prefixes):
             return None
         if request.path == "/login":

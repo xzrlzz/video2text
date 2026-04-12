@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
+import logging
 import os
 import tempfile
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, Response, jsonify, request, send_from_directory
+from flask import Blueprint, jsonify, request, send_from_directory
 
 from video2text.core.ip_creator import (
     create_ip_from_proposal,
@@ -35,8 +34,10 @@ from video2text.core.theme import (
     generate_storyboard_from_ip,
 )
 from video2text.pipeline.generator import CancellationError
+from video2text.web.telemetry import get_request_id, record_exception
 
 bp = Blueprint("ip", __name__)
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 运行时依赖：由 app.py 注册蓝图时注入
@@ -121,7 +122,17 @@ def api_create_ip():
         proposal = generate_ip_proposal(seed, settings, style_preset_id=style_preset_id)
         return jsonify({"proposal": proposal})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_ip_create")
+        log.exception(
+            "api_ip_create failed",
+            extra={
+                "event": "api_ip_create_failed",
+                "request_id": get_request_id(),
+                "user": user,
+                "ip_id": "",
+            },
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 @bp.route("/api/ip/confirm", methods=["POST"])
@@ -136,7 +147,16 @@ def api_confirm_ip():
         profile = create_ip_from_proposal(proposal, user)
         return jsonify({"ip": profile.to_dict()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_ip_confirm")
+        log.exception(
+            "api_ip_confirm failed",
+            extra={
+                "event": "api_ip_confirm_failed",
+                "request_id": get_request_id(),
+                "user": user,
+            },
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 @bp.route("/api/ip/<ip_id>", methods=["PUT"])
@@ -186,9 +206,7 @@ def api_generate_character_images(ip_id: str):
         "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    (task_dir / "task.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _deps["update_task_meta"](task_dir, meta)
 
     def _run_image_gen(tid: str, params: dict) -> None:
         td = _deps["task_dir"](tid)
@@ -214,6 +232,16 @@ def api_generate_character_images(ip_id: str):
         except Exception as e:
             _deps["update_task_meta"](td, {"status": "failed", "error": str(e)})
             _deps["sse_push"](tid, f"错误：{e}")
+            record_exception("ip_images_job")
+            log.exception(
+                "ip image generation job failed",
+                extra={
+                    "event": "ip_images_job_failed",
+                    "task_id": tid,
+                    "user": owner,
+                    "ip_id": params.get("ip_id", ""),
+                },
+            )
 
     ip_params = {"_owner": user, "ip_id": ip_id, "char_ids": char_ids}
     if not _deps["spawn"]("ip-images", _run_image_gen, task_id, ip_params):
@@ -235,7 +263,17 @@ def api_regenerate_character_image(ip_id: str, char_id: str):
         ip = generate_character_images(ip, user, settings, char_ids=[char_id])
         return jsonify({"ip": ip.to_dict()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_ip_char_regen")
+        log.exception(
+            "api_regenerate_character_image failed",
+            extra={
+                "event": "api_ip_char_regen_failed",
+                "request_id": get_request_id(),
+                "user": user,
+                "ip_id": ip_id,
+            },
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 @bp.route("/api/ip/<ip_id>/character/<char_id>/image", methods=["GET"])
@@ -312,7 +350,17 @@ def api_ip_story(ip_id: str):
         )
         return jsonify({"outline": outline})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_ip_story")
+        log.exception(
+            "api_ip_story failed",
+            extra={
+                "event": "api_ip_story_failed",
+                "request_id": get_request_id(),
+                "user": user,
+                "ip_id": ip_id,
+            },
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +390,17 @@ def api_ip_refine(ip_id: str):
         )
         return jsonify({"result": result})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_ip_refine")
+        log.exception(
+            "api_ip_refine failed",
+            extra={
+                "event": "api_ip_refine_failed",
+                "request_id": get_request_id(),
+                "user": user,
+                "ip_id": ip_id,
+            },
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +440,7 @@ def api_task_ip_theme():
         "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    (task_dir / "task.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _deps["update_task_meta"](task_dir, meta)
 
     def _run_ip_theme_job(tid: str, params: dict) -> None:
         td = _deps["task_dir"](tid)
@@ -434,6 +490,16 @@ def api_task_ip_theme():
         except Exception as e:
             _deps["update_task_meta"](td, {"status": "failed", "error": str(e)})
             _deps["sse_push"](tid, f"错误：{e}")
+            record_exception("ip_theme_job")
+            log.exception(
+                "ip theme job failed",
+                extra={
+                    "event": "ip_theme_job_failed",
+                    "task_id": tid,
+                    "user": owner,
+                    "ip_id": params.get("ip_id", ""),
+                },
+            )
 
     ip_params = {
         "_owner": user,

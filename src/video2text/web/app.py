@@ -7,6 +7,7 @@ video2text Web UI — Flask 后端：配置、任务、工作区缓存与断点�
 from __future__ import annotations
 
 import json
+import logging
 
 import shutil
 import threading
@@ -19,6 +20,7 @@ from typing import Any, Callable
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from openai import OpenAI
+from werkzeug.exceptions import HTTPException
 
 from video2text.config.settings import (
     allowed_user_config_fields,
@@ -57,6 +59,14 @@ from video2text.pipeline.generator import (
 )
 
 from video2text.web.auth import get_current_user, init_auth, is_current_user_admin
+from video2text.web.telemetry import (
+    bind_log_context,
+    get_request_id,
+    init_observability,
+    metrics_response,
+    record_exception,
+    record_task_event,
+)
 
 WORKSPACE = get_workspace_dir()
 STATIC = get_static_dir()
@@ -69,7 +79,10 @@ _RUNNING_STATUSES = frozenset({"running", "pending", "analyzing", "generating", 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB uploads
 
+init_observability(app)
 init_auth(app)
+
+log = logging.getLogger(__name__)
 
 _tasks_lock = threading.Lock()
 _active_threads: dict[str, threading.Thread] = {}
@@ -163,9 +176,38 @@ def _write_task_meta(task_id: str, data: dict[str, Any], owner: str | None = Non
     cur = {}
     if p.is_file():
         cur = json.loads(p.read_text(encoding="utf-8"))
+    prev_status = str(cur.get("status") or "")
     cur.update(data)
     cur["updated"] = _iso_now()
     p.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+    status = str(cur.get("status") or "")
+    task_type = str(cur.get("type") or "unknown")
+    task_owner = str(cur.get("owner") or owner or "")
+    if status and status != prev_status:
+        record_task_event(task_type, status)
+        log.info(
+            "task status updated",
+            extra={
+                "event": "task_status_updated",
+                "task_id": task_id,
+                "task_type": task_type,
+                "task_status": status,
+                "owner": task_owner,
+            },
+        )
+    err = data.get("error")
+    if err:
+        record_exception("task_failure")
+        log.error(
+            "task error recorded",
+            extra={
+                "event": "task_error",
+                "task_id": task_id,
+                "task_type": task_type,
+                "task_status": status or "unknown",
+                "owner": task_owner,
+            },
+        )
 
 
 def _append_progress(task_id: str, msg: str) -> None:
@@ -187,6 +229,16 @@ def _sse_push(task_id: str, event: dict[str, Any] | str) -> None:
             prog.append({"t": _iso_now(), "msg": msg})
             meta["progress"] = prog[-500:]
             _write_task_meta(task_id, meta)
+    if isinstance(event, dict) and event.get("type") == "status":
+        log.info(
+            "task status event",
+            extra={
+                "event": "task_status_event",
+                "task_id": task_id,
+                "task_status": str(event.get("status") or ""),
+                "task_type": str(_read_task_meta(task_id).get("type") or "unknown"),
+            },
+        )
 
 
 def _mask_key(key: str) -> str:
@@ -337,6 +389,36 @@ def _cleanup_old_tasks(dry_run: bool = False, ttl_days: int = 7) -> dict[str, An
 @app.route("/")
 def index_page():
     return send_from_directory(STATIC, "index.html")
+
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"ok": True, "ts": _iso_now()})
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics_endpoint():
+    return metrics_response()
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(err: Exception):
+    if isinstance(err, HTTPException):
+        return err
+    record_exception("unhandled_exception")
+    log.exception(
+        "unhandled server exception",
+        extra={
+            "event": "unhandled_exception",
+            "request_id": get_request_id(),
+            "path": request.path,
+            "method": request.method,
+            "route": request.url_rule.rule if request.url_rule else request.path,
+        },
+    )
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "服务器内部错误", "request_id": get_request_id()}), 500
+    return "Internal Server Error", 500
 
 
 @app.route("/api/config", methods=["GET"])
@@ -593,6 +675,11 @@ def _run_theme_job(task_id: str, params: dict[str, Any]) -> None:
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
+        record_exception("theme_job")
+        logging.getLogger(__name__).exception(
+            "theme job failed",
+            extra={"event": "theme_job_failed", "task_id": task_id, "owner": owner},
+        )
         log(f"失败：{e}")
 
 
@@ -696,6 +783,11 @@ def _run_analyze_job(task_id: str, params: dict[str, Any]) -> None:
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
+        record_exception("analyze_job")
+        logging.getLogger(__name__).exception(
+            "analyze job failed",
+            extra={"event": "analyze_job_failed", "task_id": task_id, "owner": owner},
+        )
         log(f"失败：{e}")
 
 
@@ -811,6 +903,11 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
     except Exception as e:
         _write_task_meta(task_id, {"status": "failed", "error": str(e)})
         _sse_push(task_id, {"type": "status", "status": "failed", "error": str(e)})
+        record_exception("generate_job")
+        logging.getLogger(__name__).exception(
+            "generate job failed",
+            extra={"event": "generate_job_failed", "task_id": task_id, "owner": owner},
+        )
         log(f"失败：{e}")
 
 
@@ -825,27 +922,80 @@ def _spawn(name: str, target: Callable[..., None], task_id: str, params: dict) -
     td.mkdir(parents=True, exist_ok=True)
     flag = td / ".running"
     lock_path = td / ".spawn.lock"
+    request_id = get_request_id()
+    owner = str(params.get("_owner") or "")
 
     with open(lock_path, "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             if flag.exists():
+                log.warning(
+                    "spawn rejected: running flag exists",
+                    extra={
+                        "event": "task_spawn_rejected",
+                        "task_id": task_id,
+                        "task_type": name,
+                        "owner": owner,
+                        "request_id": request_id,
+                    },
+                )
                 return False
             with _tasks_lock:
                 if task_id in _active_threads:
+                    log.warning(
+                        "spawn rejected: task already active",
+                        extra={
+                            "event": "task_spawn_rejected",
+                            "task_id": task_id,
+                            "task_type": name,
+                            "owner": owner,
+                            "request_id": request_id,
+                        },
+                    )
                     return False
             flag.write_text(str(os.getpid()), encoding="utf-8")
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
     def wrap() -> None:
-        try:
-            target(task_id, params)
-        finally:
-            flag.unlink(missing_ok=True)
-            with _tasks_lock:
-                _active_threads.pop(task_id, None)
-                _cancel_flags.pop(task_id, None)
+        with bind_log_context(request_id=request_id, task_id=task_id, user=owner):
+            log.info(
+                "task thread started",
+                extra={
+                    "event": "task_thread_start",
+                    "task_id": task_id,
+                    "task_type": name,
+                    "owner": owner,
+                },
+            )
+            try:
+                target(task_id, params)
+            except Exception:
+                record_exception("task_thread_unhandled")
+                log.exception(
+                    "unhandled exception in task thread",
+                    extra={
+                        "event": "task_thread_unhandled_exception",
+                        "task_id": task_id,
+                        "task_type": name,
+                        "owner": owner,
+                    },
+                )
+                raise
+            finally:
+                flag.unlink(missing_ok=True)
+                with _tasks_lock:
+                    _active_threads.pop(task_id, None)
+                    _cancel_flags.pop(task_id, None)
+                log.info(
+                    "task thread finished",
+                    extra={
+                        "event": "task_thread_end",
+                        "task_id": task_id,
+                        "task_type": name,
+                        "owner": owner,
+                    },
+                )
 
     cancel_ev = threading.Event()
     t = threading.Thread(target=wrap, daemon=True, name=name)
@@ -853,6 +1003,16 @@ def _spawn(name: str, target: Callable[..., None], task_id: str, params: dict) -
         _active_threads[task_id] = t
         _cancel_flags[task_id] = cancel_ev
     t.start()
+    log.info(
+        "task spawned",
+        extra={
+            "event": "task_spawned",
+            "task_id": task_id,
+            "task_type": name,
+            "owner": owner,
+            "request_id": request_id,
+        },
+    )
     return True
 
 
@@ -927,7 +1087,12 @@ def api_task_theme_generate_idea():
         idea = (completion.choices[0].message.content or "").strip()
         return jsonify({"ok": True, "idea": idea})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_theme_generate_idea")
+        log.exception(
+            "api_task_theme_generate_idea failed",
+            extra={"event": "api_theme_generate_idea_failed"},
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 @app.route("/api/task/theme/next", methods=["POST"])
@@ -991,7 +1156,12 @@ def api_task_theme_next():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_theme_next")
+        log.exception(
+            "api_task_theme_next failed",
+            extra={"event": "api_theme_next_failed", "task_id": task_id},
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 @app.route("/api/task/analyze", methods=["POST"])
@@ -1101,6 +1271,11 @@ def api_task_run():
             _run_generate_job(tid, gen_params)
         except Exception as e:
             _write_task_meta(tid, {"status": "failed", "error": str(e)})
+            record_exception("run_pipeline")
+            log.exception(
+                "run pipeline failed",
+                extra={"event": "run_pipeline_failed", "task_id": tid},
+            )
             _append_progress(tid, f"流水线失败：{e}")
 
     _write_task_meta(task_id, {"params_run": body})
@@ -1361,7 +1536,12 @@ def api_translate():
         result = (completion.choices[0].message.content or "").strip()
         return jsonify({"result": result})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        record_exception("api_translate")
+        log.exception(
+            "api_translate failed",
+            extra={"event": "api_translate_failed"},
+        )
+        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -1592,11 +1772,40 @@ def _update_task_meta(task_dir: Path, updates: dict[str, Any]) -> None:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     else:
         meta = {}
+    prev_status = str(meta.get("status") or "")
     meta.update(updates)
     meta["updated_at"] = datetime.now(timezone.utc).isoformat()
     meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    status = str(meta.get("status") or "")
+    task_type = str(meta.get("type") or "unknown")
+    task_id = str(meta.get("task_id") or task_dir.name)
+    owner = str(meta.get("owner") or "")
+    if status and status != prev_status:
+        record_task_event(task_type, status)
+        log.info(
+            "task status updated (bp)",
+            extra={
+                "event": "task_status_updated",
+                "task_id": task_id,
+                "task_type": task_type,
+                "task_status": status,
+                "owner": owner,
+            },
+        )
+    if updates.get("error"):
+        record_exception("task_failure")
+        log.error(
+            "task error recorded (bp)",
+            extra={
+                "event": "task_error",
+                "task_id": task_id,
+                "task_type": task_type,
+                "task_status": status or "unknown",
+                "owner": owner,
+            },
+        )
 
 
 
@@ -1663,7 +1872,10 @@ def _migrate_user_config_deltas() -> None:
         )
         migrated += 1
     if migrated:
-        print(f"[startup] 已收敛 {migrated} 个用户配置为差异存储（含备份）")
+        log.info(
+            "user config deltas migrated",
+            extra={"event": "startup_user_config_migrated", "migrated_users": migrated},
+        )
 
 
 def _start_cleanup_timer() -> None:
@@ -1677,9 +1889,20 @@ def _start_cleanup_timer() -> None:
                 result = _cleanup_old_tasks(ttl_days=_get_task_ttl_days())
                 if result["deleted"]:
                     freed_mb = round(result["freed_bytes"] / (1024 * 1024), 1)
-                    print(f"[cleanup] 定时清理：删除 {len(result['deleted'])} 个过期任务，释放 {freed_mb} MB")
+                    log.info(
+                        "periodic cleanup completed",
+                        extra={
+                            "event": "periodic_cleanup",
+                            "deleted_count": len(result["deleted"]),
+                            "freed_mb": freed_mb,
+                        },
+                    )
             except Exception as e:
-                print(f"[cleanup] 定时清理异常: {e}")
+                record_exception("cleanup_loop")
+                log.exception(
+                    "periodic cleanup failed",
+                    extra={"event": "periodic_cleanup_failed"},
+                )
 
     t = threading.Thread(target=_loop, daemon=True, name="cleanup-timer")
     t.start()
@@ -1718,7 +1941,11 @@ def main() -> None:
             "dashscope_api_base", "https://dashscope.aliyuncs.com/api/v1"
         )
     except Exception:
-        pass
+        record_exception("dashscope_init")
+        log.exception(
+            "dashscope base url init failed",
+            extra={"event": "dashscope_init_failed"},
+        )
     _ensure_workspace()
     _migrate_legacy_tasks()
     _migrate_user_config_deltas()
@@ -1726,7 +1953,14 @@ def main() -> None:
     result = _cleanup_old_tasks(ttl_days=ttl)
     if result["deleted"]:
         freed_mb = round(result["freed_bytes"] / (1024 * 1024), 1)
-        print(f"[startup] 清理 {len(result['deleted'])} 个过期任务（>{ttl} 天），释放 {freed_mb} MB")
+        log.info(
+            "startup cleanup completed",
+            extra={
+                "event": "startup_cleanup",
+                "deleted_count": len(result["deleted"]),
+                "freed_mb": freed_mb,
+            },
+        )
     _start_cleanup_timer()
     import socket
     local_ip = "127.0.0.1"
@@ -1736,9 +1970,18 @@ def main() -> None:
         local_ip = s.getsockname()[0]
         s.close()
     except Exception:
-        pass
-    print(f"video2text Web UI: http://127.0.0.1:8000  (本机)")
-    print(f"                   http://{local_ip}:8000  (局域网)")
+        record_exception("detect_local_ip")
+        log.exception(
+            "detect local ip failed",
+            extra={"event": "local_ip_detect_failed"},
+        )
+    log.info(
+        "web ui startup",
+        extra={
+            "event": "web_startup",
+            "path": f"http://127.0.0.1:8000,http://{local_ip}:8000",
+        },
+    )
     app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
 
 
