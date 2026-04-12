@@ -1415,7 +1415,21 @@
       $('#panel-theme').classList.toggle('hidden', tab !== 'theme');
       $('#panel-ip-mode').classList.toggle('hidden', tab !== 'ip-mode');
       $('#panel-analyze').classList.toggle('hidden', tab !== 'analyze');
-      if (tab === 'ip-mode') loadIPList();
+      // 普通模式的全局步骤卡片在 IP/分析模式下隐藏
+      const isNormalMode = (tab !== 'ip-mode' && tab !== 'analyze');
+      ['step2', 'step3', 'step4'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('hidden', !isNormalMode);
+      });
+      if (tab === 'ip-mode') {
+        loadIPList().then(() => {
+          if (currentIPId && currentIPData) {
+            showIPDetail(currentIPData);
+          } else {
+            ipSetStep(1);
+          }
+        });
+      }
     };
   }
 
@@ -1821,8 +1835,9 @@
     el.innerHTML = '<p class="hint">加载中…</p>';
     try {
       const { tasks } = await api('/api/workspace/list');
-      el.innerHTML = tasks.length ? '' : '<p class="hint">暂无记录</p>';
-      tasks.forEach(t => {
+      const filtered = tasks.filter(t => t.type !== 'ip-theme');
+      el.innerHTML = filtered.length ? '' : '<p class="hint">暂无记录</p>';
+      filtered.forEach(t => {
         const div = document.createElement('div');
         div.className = 'history-item';
         const sc = statusClass(t.status);
@@ -2144,24 +2159,33 @@
   function ipSetStep(step) {
     ipCurrentStep = step;
     const bar = $('#ip-steps-bar');
-    if (!bar) return;
-    bar.querySelectorAll('.ip-step').forEach(el => {
-      const s = parseInt(el.dataset.step);
-      el.classList.remove('active', 'completed', 'disabled');
-      if (s === step) el.classList.add('active');
-      else if (s < step) el.classList.add('completed');
-      else el.classList.add('disabled');
-    });
+    if (bar) {
+      bar.querySelectorAll('.ip-step').forEach(el => {
+        const s = parseInt(el.dataset.step);
+        el.classList.remove('active', 'completed', 'disabled');
+        if (s === step) el.classList.add('active');
+        else if (s < step) el.classList.add('completed');
+        else el.classList.add('disabled');
+      });
+    }
+    // 累积展开：1~step 全部显示，step+1 以后隐藏
     for (let i = 1; i <= 5; i++) {
       const panel = $(`#ip-step-${i}`);
-      if (panel) {
-        if (i === step) panel.classList.remove('hidden');
-        else panel.classList.add('hidden');
+      if (!panel) continue;
+      if (i <= step) {
+        panel.classList.remove('hidden');
+      } else {
+        panel.classList.add('hidden');
       }
+    }
+    // 滚动到当前步骤
+    const cur = $(`#ip-step-${step}`);
+    if (cur && step > 1) {
+      setTimeout(() => cur.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
     }
   }
 
-  // Step bar click
+  // Step bar click — jump to step
   if ($('#ip-steps-bar')) {
     $('#ip-steps-bar').onclick = (e) => {
       const stepEl = e.target.closest('.ip-step');
@@ -2172,6 +2196,7 @@
       }
     };
   }
+
 
   async function loadIPList() {
     try {
@@ -2184,10 +2209,94 @@
         opt.textContent = `${ip.name} (${ip.name_en}) — ${ip.tagline}`;
         sel.appendChild(opt);
       });
-      if (currentIPId) sel.value = currentIPId;
+      if (currentIPId) {
+        sel.value = currentIPId;
+      } else {
+        $('#ip-detail-panel').classList.add('hidden');
+        ipSetStep(1);
+      }
     } catch (e) {
       showToast('加载 IP 列表失败: ' + e.message);
     }
+  }
+
+  function _renderGuidelinesPanel(ip) {
+    let container = $('#ip-guidelines-panel');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'ip-guidelines-panel';
+      const summary = $('#ip-settings-summary');
+      if (summary && summary.parentNode) summary.parentNode.insertBefore(container, summary.nextSibling);
+      else return;
+    }
+    const guidelines = ip.creative_guidelines || [];
+    const feedbackCount = (ip.feedback_log || []).length;
+    if (!guidelines.length && !feedbackCount) { container.innerHTML = ''; return; }
+    container.innerHTML = `
+      <details class="guidelines-section" style="margin:8px 0;">
+        <summary style="cursor:pointer;font-weight:600;font-size:0.9em;color:var(--text-secondary);">
+          创作指南 (${guidelines.length} 条) · 反馈记录 ${feedbackCount} 条
+        </summary>
+        <div class="guidelines-body" style="padding:8px 0;">
+          ${guidelines.length ? `<ul class="guidelines-list" style="margin:0 0 8px 16px;font-size:0.85em;">${guidelines.map((g, i) => `<li>${escapeHtml(g)}</li>`).join('')}</ul>` : '<p style="font-size:0.85em;color:var(--text-secondary);">暂无创作指南</p>'}
+          <div class="inline-actions" style="gap:6px;">
+            <button type="button" class="ghost sm" id="btn-guidelines-edit">编辑指南</button>
+            ${feedbackCount >= 3 ? '<button type="button" class="ghost sm" id="btn-guidelines-distill">提炼指南</button>' : ''}
+          </div>
+        </div>
+      </details>
+    `;
+    const editBtn = container.querySelector('#btn-guidelines-edit');
+    if (editBtn) editBtn.onclick = () => _showGuidelinesEditor(ip);
+    const distillBtn = container.querySelector('#btn-guidelines-distill');
+    if (distillBtn) distillBtn.onclick = async () => {
+      distillBtn.disabled = true; distillBtn.textContent = '提炼中…';
+      try {
+        const data = await api(`/api/ip/${ip.id}/feedback/distill`, { method: 'POST', json: true, body: {} });
+        showToast('创作指南已更新', 'success');
+        ip.creative_guidelines = data.creative_guidelines;
+        _renderGuidelinesPanel(ip);
+      } catch (e) { showToast('提炼失败: ' + e.message); }
+    };
+  }
+
+  function _showGuidelinesEditor(ip) {
+    const existing = document.querySelector('.guidelines-editor-popup');
+    if (existing) existing.remove();
+    const popup = document.createElement('div');
+    popup.className = 'guidelines-editor-popup';
+    popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:200;width:min(500px,90vw);background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+    const lines = (ip.creative_guidelines || []).join('\n');
+    popup.innerHTML = `
+      <h4 style="margin:0 0 12px;">编辑创作指南</h4>
+      <p style="font-size:0.85em;color:var(--text-secondary);margin:0 0 8px;">每行一条指南规则</p>
+      <textarea style="min-height:120px;">${escapeHtml(lines)}</textarea>
+      <div class="flex" style="margin-top:12px;justify-content:flex-end;gap:8px;">
+        <button type="button" class="primary sm" id="guidelines-save">保存</button>
+        <button type="button" class="ghost sm" id="guidelines-cancel">取消</button>
+      </div>
+    `;
+    document.body.appendChild(popup);
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:199;';
+    document.body.appendChild(overlay);
+    const close = () => { popup.remove(); overlay.remove(); };
+    overlay.onclick = close;
+    popup.querySelector('#guidelines-cancel').onclick = close;
+    popup.querySelector('#guidelines-save').onclick = async () => {
+      const text = popup.querySelector('textarea').value;
+      const newGuidelines = text.split('\n').map(s => s.trim()).filter(Boolean);
+      try {
+        const data = await api(`/api/ip/${ip.id}/guidelines`, {
+          method: 'PUT', json: true,
+          body: { guidelines: newGuidelines },
+        });
+        ip.creative_guidelines = data.creative_guidelines;
+        close();
+        showToast('创作指南已保存', 'success');
+        _renderGuidelinesPanel(ip);
+      } catch (e) { showToast('保存失败: ' + e.message); }
+    };
   }
 
   function renderIPSettingsSummary(ip) {
@@ -2207,7 +2316,7 @@
       </div>
       <div class="inline-actions">
         <button type="button" class="ghost sm" id="btn-ip-edit-settings">编辑设定</button>
-        <button type="button" class="ghost sm" id="btn-ip-refine-settings">AI 润色</button>
+        <button type="button" class="ghost sm" id="btn-ip-refine-settings">修改润色</button>
       </div>
     `;
     const editBtn = $('#btn-ip-edit-settings');
@@ -2229,28 +2338,55 @@
     $('#ip-detail-tagline').textContent = ip.tagline;
     renderIPSettingsSummary(ip);
 
-    // Determine which step to enable
     const hasChars = (ip.characters || []).length > 0;
     const allHaveImages = hasChars && ip.characters.every(c => c.reference_image_path);
-    if (allHaveImages) {
-      ipSetStep(3);
-    } else if (hasChars) {
-      ipSetStep(2);
-      renderCharCards(ip);
-    } else {
-      ipSetStep(1);
+
+    const hasOutline = ip.last_story_outline && Object.keys(ip.last_story_outline).length > 0;
+
+    const hasStoryboard = hasOutline && ip.last_story_outline._last_storyboard_task_id;
+
+    // 确定最远可达步骤
+    let reachable = 1;
+    if (hasChars) reachable = 2;
+    if (allHaveImages) reachable = 3;
+    if (allHaveImages && hasOutline) reachable = 4;
+    if (allHaveImages && hasOutline && hasStoryboard) reachable = 5;
+
+    // 进入最远可达步骤
+    ipSetStep(reachable);
+
+    // 允许回看已完成步骤
+    for (let s = 1; s < reachable; s++) {
+      const el = $(`#ip-steps-bar [data-step="${s}"]`);
+      if (el) { el.classList.remove('disabled'); el.classList.add('completed'); }
     }
 
-    // Enable completed steps for navigation
-    if (hasChars) {
-      const step2El = $('#ip-steps-bar [data-step="2"]');
-      if (step2El) { step2El.classList.remove('disabled'); step2El.classList.add('completed'); }
-      renderCharCards(ip);
+    // 渲染角色卡片（step 2 面板内容，即使当前不在 step 2 也需要准备好）
+    if (hasChars) renderCharCards(ip);
+
+    // 恢复持久化的故事大纲
+    if (hasOutline) {
+      ipStoryOutline = ip.last_story_outline;
+      renderIPStoryPreview(ip.last_story_outline);
+
+      // 恢复分镜预览
+      const sbTaskId = ip.last_story_outline._last_storyboard_task_id;
+      if (sbTaskId) {
+        _ipLastStoryboardTaskId = sbTaskId;
+        _loadIPStoryboardPreview(sbTaskId);
+      }
     }
-    if (allHaveImages) {
-      const step3El = $('#ip-steps-bar [data-step="3"]');
-      if (step3El) { step3El.classList.remove('disabled'); }
+
+    // 恢复视频生成记录
+    _ipVideoRuns = [];
+    if (ip.last_video_task_ids && ip.last_video_task_ids.length) {
+      _restoreIPVideoRuns(ip.last_video_task_ids);
+    } else {
+      _renderIPVideoRuns();
     }
+
+    // 渲染创作指南面板
+    _renderGuidelinesPanel(ip);
   }
 
   async function reloadCurrentIP() {
@@ -2305,7 +2441,7 @@
       card.innerHTML = `
         <div class="ip-char-card-img">
           ${hasImg
-            ? `<img src="/api/ip/${ip.id}/character/${c.id}/image?t=${Date.now()}" onerror="this.parentNode.innerHTML='<div class=\\'char-img-placeholder\\'>图片加载失败</div>'" />`
+            ? `<img src="/api/ip/${ip.id}/character/${c.id}/image?t=${Date.now()}" data-full-src="/api/ip/${ip.id}/character/${c.id}/image?t=${Date.now()}" onerror="this.parentNode.innerHTML='<div class=\\'char-img-placeholder\\'>图片加载失败</div>'" title="点击查看大图" />`
             : `<div class="char-img-placeholder">📷<span>暂无参考图</span></div>`
           }
         </div>
@@ -2327,21 +2463,151 @@
       container.appendChild(card);
     });
 
+    function _refreshSingleCharImage(charId) {
+      const card = container.querySelector(`[data-action="regen"][data-char-id="${charId}"]`);
+      if (!card) return;
+      const cardEl = card.closest('.ip-char-card');
+      if (!cardEl) return;
+      const imgWrap = cardEl.querySelector('.ip-char-card-img');
+      if (imgWrap) {
+        imgWrap.innerHTML = `<img src="/api/ip/${ip.id}/character/${charId}/image?t=${Date.now()}" data-full-src="/api/ip/${ip.id}/character/${charId}/image?t=${Date.now()}" onerror="this.parentNode.innerHTML='<div class=\\'char-img-placeholder\\'>图片加载失败</div>'" title="点击查看大图" />`;
+        imgWrap.querySelector('img').onclick = () => {
+          const lb = document.createElement('div');
+          lb.className = 'img-lightbox';
+          lb.innerHTML = `<img src="/api/ip/${ip.id}/character/${charId}/image?t=${Date.now()}" />`;
+          lb.onclick = () => lb.remove();
+          document.body.appendChild(lb);
+        };
+      }
+    }
+
     // Bind actions
     container.querySelectorAll('[data-action="regen"]').forEach(btn => {
-      btn.onclick = async () => {
-        const charId = btn.dataset.charId;
-        btn.disabled = true; btn.textContent = '生成中…';
+      btn.onclick = () => _startCharRegen(btn, btn.dataset.charId, ip.id, {});
+    });
+
+    function _startCharRegen(btn, charId, ipId, extraBody) {
+      const cardEl = btn.closest('.ip-char-card');
+      _clearCardError(cardEl);
+      _clearCardProgress(cardEl);
+      btn.disabled = true; btn.textContent = '启动中…';
+
+      api(`/api/ip/${ipId}/character/${charId}/regenerate`, {
+        method: 'POST',
+        json: Object.keys(extraBody).length > 0,
+        body: Object.keys(extraBody).length > 0 ? extraBody : undefined,
+      }).then(data => {
+        if (data.task_id) {
+          btn.textContent = '生成中…';
+          _pollCharRegenTask(data.task_id, btn, cardEl, charId, ipId);
+        }
+      }).catch(e => {
+        btn.textContent = '重新生成'; btn.disabled = false;
+        showToast('启动失败: ' + e.message);
+      });
+    }
+
+    function _pollCharRegenTask(taskId, btn, cardEl, charId, ipId) {
+      const progressEl = _ensureCardProgress(cardEl);
+      let lastLen = 0;
+      const timer = setInterval(async () => {
         try {
-          const data = await api(`/api/ip/${ip.id}/character/${charId}/regenerate`, { method: 'POST' });
-          showToast('角色图已重新生成', 'success');
-          if (data.ip) { currentIPData = data.ip; renderCharCards(data.ip); }
+          const task = await api(`/api/task/${taskId}`);
+          const progress = task.progress || [];
+          for (let i = lastLen; i < progress.length; i++) {
+            const msg = typeof progress[i] === 'string' ? progress[i] : (progress[i].message || JSON.stringify(progress[i]));
+            const line = document.createElement('div');
+            line.textContent = msg;
+            progressEl.appendChild(line);
+            progressEl.scrollTop = progressEl.scrollHeight;
+          }
+          lastLen = progress.length;
+
+          if (task.status === 'done' || task.status === 'failed') {
+            clearInterval(timer);
+            btn.textContent = '重新生成'; btn.disabled = false;
+
+            if (task.status === 'done' && task.char_ok) {
+              showToast(`角色图已重新生成`, 'success');
+              if (task.ip) { currentIPData = task.ip; }
+              _refreshSingleCharImage(charId);
+              const descEl = cardEl.querySelector('.ip-char-card-desc');
+              if (descEl && task.ip) {
+                const uc = (task.ip.characters || []).find(x => x.id === charId);
+                if (uc) descEl.textContent = (uc.visual_description || '').substring(0, 120);
+              }
+              setTimeout(() => _clearCardProgress(cardEl), 3000);
+            } else if (task.status === 'failed') {
+              const errType = task.error_type || '';
+              const canFix = task.can_auto_fix || false;
+              if (canFix && errType) {
+                _showCardError(cardEl, charId, ipId, errType, task.error || '');
+              } else {
+                showToast('生成失败: ' + (task.error || '未知错误'));
+              }
+              setTimeout(() => _clearCardProgress(cardEl), 5000);
+            } else {
+              setTimeout(() => _clearCardProgress(cardEl), 3000);
+            }
+          }
         } catch (e) {
-          showToast('重新生成失败: ' + e.message);
+          clearInterval(timer);
           btn.textContent = '重新生成'; btn.disabled = false;
         }
+      }, 1500);
+    }
+
+    function _ensureCardProgress(cardEl) {
+      let el = cardEl.querySelector('.char-progress-log');
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'char-progress-log';
+        cardEl.appendChild(el);
+      }
+      el.innerHTML = '';
+      return el;
+    }
+
+    function _clearCardProgress(cardEl) {
+      if (!cardEl) return;
+      const el = cardEl.querySelector('.char-progress-log');
+      if (el) el.remove();
+    }
+
+    function _clearCardError(cardEl) {
+      if (!cardEl) return;
+      const old = cardEl.querySelector('.char-error-bar');
+      if (old) old.remove();
+    }
+
+    function _showCardError(cardEl, charId, ipId, errorType, errMsg) {
+      if (!cardEl) return;
+      _clearCardError(cardEl);
+      const errorLabels = {
+        '版权侵权': { icon: '⚠️', label: '版权风险', hint: '角色名称或描述可能涉及已有版权' },
+        '内容安全审核': { icon: '🛡️', label: '安全审核', hint: '内容未通过平台安全审核' },
+        '内容过滤': { icon: '🚫', label: '内容过滤', hint: '内容被平台过滤' },
+        '安全审核': { icon: '🛡️', label: '安全审核', hint: '内容未通过安全检测' },
+        '政策违规': { icon: '📜', label: '政策违规', hint: '内容不符合平台政策' },
+        '敏感内容': { icon: '⚡', label: '敏感内容', hint: '内容包含敏感信息' },
       };
-    });
+      const info = errorLabels[errorType] || { icon: '❌', label: errorType, hint: errMsg };
+      const bar = document.createElement('div');
+      bar.className = 'char-error-bar';
+      bar.innerHTML = `
+        <div class="char-error-info">
+          <span class="char-error-icon">${info.icon}</span>
+          <span class="char-error-text"><strong>${info.label}</strong>：${escapeHtml(info.hint)}</span>
+        </div>
+        <button type="button" class="btn-auto-fix" data-char-id="${charId}">🔧 一键修正重试</button>
+      `;
+      cardEl.appendChild(bar);
+      bar.querySelector('.btn-auto-fix').onclick = () => {
+        _clearCardError(cardEl);
+        const regenBtn = cardEl.querySelector('[data-action="regen"]');
+        _startCharRegen(regenBtn || bar, charId, ipId, { auto_fix: true, error_reason: errorType });
+      };
+    }
     container.querySelectorAll('[data-action="upload"]').forEach(btn => {
       btn.onclick = () => {
         const charId = btn.dataset.charId;
@@ -2355,13 +2621,26 @@
           try {
             const data = await api(`/api/ip/${ip.id}/character/${charId}/upload`, { method: 'POST', body: fd });
             showToast('角色图已上传', 'success');
-            if (data.ip) { currentIPData = data.ip; renderCharCards(data.ip); }
+            if (data.ip) { currentIPData = data.ip; }
+            _refreshSingleCharImage(charId);
+            btn.textContent = '上传替换'; btn.disabled = false;
           } catch (e) {
             showToast('上传失败: ' + e.message);
             btn.textContent = '上传替换'; btn.disabled = false;
           }
         };
         input.click();
+      };
+    });
+
+    // Click image to view full size
+    container.querySelectorAll('.ip-char-card-img img[data-full-src]').forEach(img => {
+      img.onclick = () => {
+        const lb = document.createElement('div');
+        lb.className = 'img-lightbox';
+        lb.innerHTML = `<img src="${img.dataset.fullSrc}" />`;
+        lb.onclick = () => lb.remove();
+        document.body.appendChild(lb);
       };
     });
 
@@ -2397,15 +2676,69 @@
     }
   }
 
+  function _refreshCharVoiceLabel(charId, ipData) {
+    const container = $('#ip-char-cards');
+    if (!container) return;
+    const c = (ipData.characters || []).find(x => x.id === charId);
+    if (!c) return;
+    const btn = container.querySelector(`[data-action="voice"][data-char-id="${charId}"]`);
+    if (!btn) return;
+    const cardEl = btn.closest('.ip-char-card');
+    if (!cardEl) return;
+    const voiceDiv = cardEl.querySelector('.ip-char-card-voice');
+    if (!voiceDiv) return;
+    const vp = c.voice_profile || {};
+    const voiceLabel = vp.mode === 'preset' ? (vp.preset_name || vp.preset_id || '预置')
+                     : vp.mode === 'clone' ? '克隆音色'
+                     : '未设置';
+    voiceDiv.innerHTML = `
+      <span class="voice-label" title="角色音色">🎙 ${escapeHtml(voiceLabel)}</span>
+      <button type="button" class="ghost sm" data-action="voice" data-char-id="${c.id}">设置音色</button>
+      ${vp.mode ? `<button type="button" class="ghost sm" data-action="preview-voice" data-char-id="${c.id}">试听</button>` : ''}
+    `;
+    voiceDiv.querySelector('[data-action="voice"]').onclick = () => showVoiceSelector(ipData, charId);
+    const previewBtn = voiceDiv.querySelector('[data-action="preview-voice"]');
+    if (previewBtn) {
+      previewBtn.onclick = async () => {
+        previewBtn.disabled = true; previewBtn.textContent = '播放中…';
+        try {
+          const data = await api(`/api/ip/${ipData.id}/character/${charId}/voice/preview`, {
+            method: 'POST', json: true, body: { text: '' },
+          });
+          if (data.audio_base64) {
+            const audio = new Audio('data:audio/wav;base64,' + data.audio_base64);
+            audio.play();
+            audio.onended = () => { previewBtn.textContent = '试听'; previewBtn.disabled = false; };
+          }
+        } catch (e) {
+          showToast('试听失败: ' + e.message);
+          previewBtn.textContent = '试听'; previewBtn.disabled = false;
+        }
+      };
+    }
+  }
+
+  function _closeVoiceDrawer() {
+    const overlay = document.querySelector('.voice-drawer-overlay');
+    const drawer = document.querySelector('.voice-drawer');
+    if (overlay) overlay.remove();
+    if (drawer) drawer.remove();
+  }
+
   async function showVoiceSelector(ip, charId) {
+    _closeVoiceDrawer();
     const presets = await loadVoicePresets();
     const char = (ip.characters || []).find(c => c.id === charId);
     if (!char) return;
     const vp = char.voice_profile || {};
 
     const overlay = document.createElement('div');
-    overlay.className = 'refine-popup';
-    overlay.style.display = 'flex';
+    overlay.className = 'voice-drawer-overlay';
+    overlay.onclick = _closeVoiceDrawer;
+    document.body.appendChild(overlay);
+
+    const drawer = document.createElement('div');
+    drawer.className = 'voice-drawer';
 
     let presetsHtml = '';
     (presets || []).forEach(group => {
@@ -2418,63 +2751,67 @@
       presetsHtml += '</div>';
     });
 
-    overlay.innerHTML = `
-      <div class="refine-popup-inner" style="max-width:560px;">
-        <h3>🎙 设置音色 — ${escapeHtml(char.name)}</h3>
-        <div style="margin-bottom:12px;">
-          <label><input type="radio" name="voice-mode-${charId}" value="preset" ${vp.mode !== 'clone' ? 'checked' : ''}> 预置音色</label>
-          <label style="margin-left:16px;"><input type="radio" name="voice-mode-${charId}" value="clone" ${vp.mode === 'clone' ? 'checked' : ''}> 上传克隆</label>
+    drawer.innerHTML = `
+      <div class="voice-drawer-header">
+        <h3>🎙 ${escapeHtml(char.name)} — 音色设置</h3>
+        <button class="close-btn" id="voice-drawer-close">&times;</button>
+      </div>
+      <div class="voice-drawer-body">
+        <div style="margin-bottom:16px;">
+          <label style="cursor:pointer;"><input type="radio" name="vd-mode" value="preset" ${vp.mode !== 'clone' ? 'checked' : ''}> 预置音色</label>
+          <label style="margin-left:16px;cursor:pointer;"><input type="radio" name="vd-mode" value="clone" ${vp.mode === 'clone' ? 'checked' : ''}> 上传克隆</label>
         </div>
-        <div id="voice-preset-panel-${charId}">${presetsHtml}</div>
-        <div id="voice-clone-panel-${charId}" class="hidden" style="margin-top:8px;">
-          <p style="color:var(--muted);font-size:13px;">上传 3~10 秒清晰语音用于声音克隆。</p>
-          <input type="file" id="voice-clone-file-${charId}" accept="audio/*" />
-        </div>
-        <div class="flex" style="margin-top:16px;gap:8px;">
-          <button class="primary" id="voice-save-${charId}">保存</button>
-          <button class="ghost" id="voice-cancel-${charId}">取消</button>
+        <div id="vd-preset-panel">${presetsHtml}</div>
+        <div id="vd-clone-panel" class="${vp.mode === 'clone' ? '' : 'hidden'}" style="margin-top:12px;">
+          <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">上传 3~10 秒清晰语音用于声音克隆（支持 wav/mp3）。</p>
+          <input type="file" id="vd-clone-file" accept="audio/*" style="font-size:13px;" />
+          ${vp.reference_audio_path ? `<p style="font-size:12px;color:var(--accent);margin-top:6px;">已有参考音频</p>` : ''}
         </div>
       </div>
+      <div class="voice-drawer-footer">
+        <button class="ghost" id="vd-cancel">取消</button>
+        <button class="primary" id="vd-save">保存</button>
+      </div>
     `;
-    document.body.appendChild(overlay);
+    document.body.appendChild(drawer);
 
     let selectedPresetId = vp.preset_id || '';
     let selectedPresetName = vp.preset_name || '';
 
-    overlay.querySelectorAll('.voice-chip').forEach(chip => {
+    drawer.querySelectorAll('.voice-chip').forEach(chip => {
       chip.onclick = () => {
-        overlay.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('selected'));
+        drawer.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('selected'));
         chip.classList.add('selected');
         selectedPresetId = chip.dataset.vid;
         selectedPresetName = chip.dataset.vname;
       };
     });
 
-    overlay.querySelectorAll(`[name="voice-mode-${charId}"]`).forEach(radio => {
+    drawer.querySelectorAll('[name="vd-mode"]').forEach(radio => {
       radio.onchange = () => {
-        const mode = radio.value;
-        const presetPanel = overlay.querySelector(`#voice-preset-panel-${charId}`);
-        const clonePanel = overlay.querySelector(`#voice-clone-panel-${charId}`);
-        if (mode === 'preset') { presetPanel.classList.remove('hidden'); clonePanel.classList.add('hidden'); }
+        const presetPanel = drawer.querySelector('#vd-preset-panel');
+        const clonePanel = drawer.querySelector('#vd-clone-panel');
+        if (radio.value === 'preset') { presetPanel.classList.remove('hidden'); clonePanel.classList.add('hidden'); }
         else { presetPanel.classList.add('hidden'); clonePanel.classList.remove('hidden'); }
       };
     });
 
-    overlay.querySelector(`#voice-cancel-${charId}`).onclick = () => overlay.remove();
+    drawer.querySelector('#voice-drawer-close').onclick = _closeVoiceDrawer;
+    drawer.querySelector('#vd-cancel').onclick = _closeVoiceDrawer;
 
-    overlay.querySelector(`#voice-save-${charId}`).onclick = async () => {
-      const mode = overlay.querySelector(`[name="voice-mode-${charId}"]:checked`).value;
+    drawer.querySelector('#vd-save').onclick = async () => {
+      const mode = drawer.querySelector('[name="vd-mode"]:checked').value;
       if (mode === 'clone') {
-        const fileInput = overlay.querySelector(`#voice-clone-file-${charId}`);
+        const fileInput = drawer.querySelector('#vd-clone-file');
         if (fileInput.files && fileInput.files[0]) {
           const fd = new FormData();
           fd.append('file', fileInput.files[0]);
           try {
             const data = await api(`/api/ip/${ip.id}/character/${charId}/voice/upload`, { method: 'POST', body: fd });
             showToast('参考音频已上传', 'success');
-            if (data.ip) { currentIPData = data.ip; renderCharCards(data.ip); }
+            if (data.ip) { currentIPData = data.ip; _refreshCharVoiceLabel(charId, data.ip); }
           } catch (e) { showToast('上传失败: ' + e.message); }
-        } else {
+        } else if (!vp.reference_audio_path) {
           showToast('请选择音频文件');
           return;
         }
@@ -2486,10 +2823,10 @@
             body: { mode: 'preset', preset_id: selectedPresetId, preset_name: selectedPresetName },
           });
           showToast('音色已设置', 'success');
-          if (data.ip) { currentIPData = data.ip; renderCharCards(data.ip); }
+          if (data.ip) { currentIPData = data.ip; _refreshCharVoiceLabel(charId, data.ip); }
         } catch (e) { showToast('设置失败: ' + e.message); }
       }
-      overlay.remove();
+      _closeVoiceDrawer();
     };
   }
 
@@ -2562,12 +2899,29 @@
         ipStoryOutline = data.outline;
         renderIPStoryPreview(data.outline);
         showToast('故事大纲已生成', 'success');
-        // Unlock step 4
-        const step4El = $('#ip-steps-bar [data-step="4"]');
-        if (step4El) { step4El.classList.remove('disabled'); }
+        const recShots = parseInt(data.outline.recommended_shot_count);
+        if (recShots && recShots > 0) {
+          const avgDur = parseFloat(($('#ip-avg-shot-dur') || {}).value) || 2.5;
+          const totalSec = Math.round(recShots * avgDur);
+          const m = Math.floor(totalSec / 60), s = totalSec % 60;
+          if ($('#ip-target-min')) $('#ip-target-min').value = m;
+          if ($('#ip-target-sec')) $('#ip-target-sec').value = s;
+          _calcShotCount();
+        }
+        ipSetStep(4);
       } catch (e) { showToast('故事生成失败: ' + e.message); }
       btn.disabled = false; btn.textContent = '生成故事大纲';
     };
+  }
+
+  function _renderOutlineTranslation(container, tTitle, tSynopsis, tBeats) {
+    let html = `<b>标题:</b> ${escapeHtml(tTitle)}<br/><b>概要:</b> ${escapeHtml(tSynopsis)}`;
+    if (tBeats.length) {
+      html += '<br/><b>叙事节拍:</b><ol style="margin:4px 0 0 16px;">';
+      tBeats.forEach(b => { html += `<li>${escapeHtml(b)}</li>`; });
+      html += '</ol>';
+    }
+    container.innerHTML = `<div class="translate-result">${html}</div>`;
   }
 
   function renderIPStoryPreview(outline) {
@@ -2596,15 +2950,19 @@
       }).join(' ');
     }
 
+    const recShots = outline.recommended_shot_count;
+    const recHtml = recShots ? `<div class="ip-story-field"><div class="ip-story-field-label">推荐镜头数</div><div class="ip-story-field-content" style="font-weight:600;color:var(--primary);">${recShots} 镜</div></div>` : '';
+
     container.innerHTML = `
       <div class="ip-story-card">
         <h4>${escapeHtml(title)}</h4>
         ${synopsis ? `<div class="ip-story-field"><div class="ip-story-field-label">故事概要</div><div class="ip-story-field-content">${escapeHtml(synopsis)}</div></div>` : ''}
         ${castHtml ? `<div class="ip-story-field"><div class="ip-story-field-label">出场角色</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${castHtml}</div></div>` : ''}
+        ${recHtml}
         ${beatsHtml ? `<div class="ip-story-field"><div class="ip-story-field-label">叙事节拍</div>${beatsHtml}</div>` : ''}
         <div class="inline-actions" style="margin-top:12px;">
           <button type="button" class="ghost sm" id="btn-ip-story-translate">翻译</button>
-          <button type="button" class="ghost sm" id="btn-ip-story-refine">AI 润色</button>
+          <button type="button" class="ghost sm" id="btn-ip-story-refine">修改润色</button>
           <button type="button" class="ghost sm" id="btn-ip-story-regen">重新生成</button>
         </div>
         <div id="ip-story-translate-result" class="hidden"></div>
@@ -2612,24 +2970,47 @@
       </div>
     `;
 
-    // Translate button
+    // Translate button — use cached translation or call qwen-mt-flash
     const translateBtn = $('#btn-ip-story-translate');
     if (translateBtn) translateBtn.onclick = async () => {
       const resultDiv = $('#ip-story-translate-result');
       resultDiv.classList.remove('hidden');
+
+      const cached = outline._translation_zh;
+      if (cached && cached.title) {
+        _renderOutlineTranslation(resultDiv, cached.title, cached.synopsis, cached.beats || []);
+        return;
+      }
+
       resultDiv.innerHTML = '<div class="translate-result">翻译中…</div>';
       try {
-        const text = JSON.stringify(outline, null, 2);
-        const data = await api('/api/ip/' + currentIPId + '/refine', {
+        const title = outline.title || outline.episode_title || '';
+        const synopsis = outline.synopsis || outline.logline || '';
+        const beats = (outline.narrative_beats || []).map(b => b.description || '').filter(Boolean);
+        const allText = [title, synopsis, ...beats].join('\n[SEP]\n');
+        const data = await api('/api/translate', {
           method: 'POST', json: true,
-          body: { section: 'story_outline', instruction: 'Translate all English content to Chinese. Keep JSON structure.', current_content: outline },
+          body: { text: allText, target: 'zh' },
         });
-        const translated = data.result;
-        const tTitle = (typeof translated === 'object') ? (translated.title || translated.episode_title || '') : '';
-        const tSynopsis = (typeof translated === 'object') ? (translated.synopsis || translated.logline || '') : String(translated);
-        resultDiv.innerHTML = `<div class="translate-result"><b>标题:</b> ${escapeHtml(tTitle)}<br/><b>概要:</b> ${escapeHtml(tSynopsis)}</div>`;
+        const parts = (data.result || '').split(/\[SEP\]/i).map(s => s.trim());
+        const tTitle = parts[0] || '';
+        const tSynopsis = parts[1] || '';
+        const tBeats = parts.slice(2).filter(Boolean);
+        _renderOutlineTranslation(resultDiv, tTitle, tSynopsis, tBeats);
+
+        outline._translation_zh = { title: tTitle, synopsis: tSynopsis, beats: tBeats };
+        ipStoryOutline = outline;
+        api('/api/ip/' + currentIPId + '/outline', { method: 'PUT', json: true, body: { outline } }).catch(() => {});
       } catch (e) { resultDiv.innerHTML = `<div class="translate-result" style="color:var(--danger)">翻译失败: ${escapeHtml(e.message)}</div>`; }
     };
+
+    if (outline._translation_zh && outline._translation_zh.title) {
+      const resultDiv = $('#ip-story-translate-result');
+      if (resultDiv) {
+        resultDiv.classList.remove('hidden');
+        _renderOutlineTranslation(resultDiv, outline._translation_zh.title, outline._translation_zh.synopsis, outline._translation_zh.beats || []);
+      }
+    }
 
     // AI refine button
     const refineBtn = $('#btn-ip-story-refine');
@@ -2658,9 +3039,12 @@
               body: { section: 'story_outline', instruction, current_content: ipStoryOutline },
             });
             if (typeof data.result === 'object') {
+              const oldOutline = ipStoryOutline;
               ipStoryOutline = data.result;
               renderIPStoryPreview(data.result);
               showToast('故事已润色', 'success');
+              _recordFeedback('story', 'story_outline', instruction, oldOutline, data.result);
+              api('/api/ip/' + currentIPId + '/outline', { method: 'PUT', json: true, body: { outline: data.result } }).catch(() => {});
             }
           } catch (e) { showToast('润色失败: ' + e.message); }
           goBtn.disabled = false; goBtn.textContent = '润色';
@@ -2678,12 +3062,686 @@
   }
 
   // ── Step 4: 分镜生成 ──
+  let _ipLastStoryboardTaskId = null;
+  let _ipVideoRuns = []; // { task_id, status, output_url, created }
+
+  const _SHOT_TYPE_MAP = { ECU: '极特写', CU: '特写', MCU: '中近景', MS: '中景', MLS: '中远景', WS: '远景', EWS: '大远景' };
+  let _ipStoryboardShots = [];
+  let _ipStoryboardTranslated = false;
+
+  async function _loadIPStoryboardPreview(taskId) {
+    const container = $('#ip-storyboard-preview');
+    if (!container) return;
+    try {
+      const st = await api(`/api/task/${taskId}`);
+      const sb = st.storyboard;
+      if (!sb || !sb.shots || !sb.shots.length) {
+        container.innerHTML = '<p style="color:var(--text-secondary);">未获取到分镜数据</p>';
+        container.classList.remove('hidden');
+        return;
+      }
+      _ipStoryboardShots = sb.shots;
+      _ipStoryboardTranslated = sb.shots.some(s => s._scene_zh || s._dialogue_zh);
+      _renderStoryboardTable(container);
+    } catch (e) {
+      container.innerHTML = `<p style="color:var(--danger);">加载分镜失败: ${escapeHtml(e.message)}</p>`;
+      container.classList.remove('hidden');
+    }
+  }
+
+  function _renderStoryboardTable(container) {
+    if (!container) container = $('#ip-storyboard-preview');
+    if (!container) return;
+    const shots = _ipStoryboardShots;
+    if (!shots.length) return;
+
+    const totalDur = shots.reduce((s, sh) => s + (parseFloat(sh.duration) || 0), 0);
+    let cards = '';
+    shots.forEach((shot, i) => {
+      const id = shot.shot_id || i + 1;
+      const dur = shot.duration || '?';
+      const rawType = (shot.shot_type || '').toUpperCase().trim();
+      const typeCn = _SHOT_TYPE_MAP[rawType] || rawType;
+      const typeLabel = typeCn !== rawType ? `${typeCn}(${rawType})` : rawType;
+
+      const chars = (shot.characters_in_shot || []);
+      const charsHtml = chars.length
+        ? chars.map(c => `<span class="mention-chip" style="font-size:0.75em;">@${escapeHtml(c)}</span>`).join(' ')
+        : (shot.focal_character ? `<span class="mention-chip" style="font-size:0.75em;">@${escapeHtml(shot.focal_character)}</span>` : '<span style="opacity:0.5;">—</span>');
+
+      const scene = escapeHtml(shot._scene_zh || shot.scene_description || '');
+      const dlg = shot.dialogue ? escapeHtml(shot._dialogue_zh || shot.dialogue) : '<span style="opacity:0.4;">无对白</span>';
+      const prompt = escapeHtml(shot._prompt_zh || shot.generation_prompt || '');
+      const action = shot.character_action ? escapeHtml(shot._action_zh || shot.character_action) : '';
+      const camera = shot.camera_movement ? escapeHtml(shot.camera_movement) : '';
+      const mood = shot.mood ? escapeHtml(shot.mood) : '';
+
+      cards += `<div class="ip-shot-card" data-shot-idx="${i}" style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;background:var(--surface);">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
+          <span style="font-weight:700;font-size:1.1em;color:var(--primary);">#${id}</span>
+          <span style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:0.8em;">${dur}s</span>
+          <span style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:0.8em;" title="${rawType}: ${typeCn}">${typeLabel}</span>
+          ${camera ? `<span style="font-size:0.8em;opacity:0.7;">${escapeHtml(camera)}</span>` : ''}
+          <span style="flex:1;"></span>
+          ${charsHtml}
+          <button type="button" class="ghost sm ip-shot-refine-btn" data-idx="${i}" style="font-size:0.75em;padding:2px 8px;" title="修改润色此分镜">✏ 润色</button>
+        </div>
+        <div style="font-size:0.85em;line-height:1.5;">
+          <div><b>场景：</b>${scene}</div>
+          ${action ? `<div><b>动作：</b>${action}</div>` : ''}
+          <div><b>对白：</b><span style="font-style:italic;color:var(--primary);">${dlg}</span></div>
+          ${mood ? `<div><b>氛围：</b><span style="opacity:0.7;">${mood}</span></div>` : ''}
+          <div style="margin-top:4px;opacity:0.6;font-size:0.85em;"><b>画面指令：</b>${prompt}</div>
+        </div>
+      </div>`;
+    });
+
+    container.innerHTML = `
+      <details open>
+        <summary style="cursor:pointer;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span>分镜预览 · ${shots.length} 镜 · ${totalDur.toFixed(1)}s</span>
+          <button type="button" class="ghost sm" id="ip-sb-translate-btn" style="font-size:0.75em;padding:2px 10px;">${_ipStoryboardTranslated ? '显示原文' : '翻译'}</button>
+        </summary>
+        ${cards}
+      </details>`;
+    container.classList.remove('hidden');
+
+    // 翻译按钮
+    const trBtn = container.querySelector('#ip-sb-translate-btn');
+    if (trBtn) {
+      trBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (_ipStoryboardTranslated) {
+          _ipStoryboardTranslated = false;
+          _renderStoryboardTable(container);
+          return;
+        }
+        trBtn.disabled = true; trBtn.textContent = '翻译中…';
+        try {
+          const texts = shots.map(s =>
+            [s.scene_description || '', s.dialogue || '', s.generation_prompt || '', s.character_action || ''].join('\n[FIELD]\n')
+          );
+          const joined = texts.join('\n[SHOT]\n');
+          const resp = await api('/api/translate', { method: 'POST', json: true, body: { text: joined, source_lang: 'en', target_lang: 'zh' } });
+          const translated = (resp.translated || '').split('\n[SHOT]\n');
+          translated.forEach((block, i) => {
+            if (i >= shots.length) return;
+            const fields = block.split('\n[FIELD]\n');
+            shots[i]._scene_zh = (fields[0] || '').trim();
+            shots[i]._dialogue_zh = (fields[1] || '').trim();
+            shots[i]._prompt_zh = (fields[2] || '').trim();
+            shots[i]._action_zh = (fields[3] || '').trim();
+          });
+          _ipStoryboardTranslated = true;
+          _renderStoryboardTable(container);
+          // 持久化翻译到后端
+          if (_ipLastStoryboardTaskId) {
+            const updates = shots.map((s, idx) => ({ _index: idx, _scene_zh: s._scene_zh || '', _dialogue_zh: s._dialogue_zh || '', _prompt_zh: s._prompt_zh || '', _action_zh: s._action_zh || '' }));
+            api(`/api/task/${_ipLastStoryboardTaskId}/storyboard`, { method: 'PUT', json: true, body: { shots: updates } }).catch(() => {});
+          }
+        } catch (err) {
+          showToast('翻译失败: ' + err.message);
+          trBtn.disabled = false; trBtn.textContent = '翻译';
+        }
+      };
+    }
+
+    // 润色按钮
+    container.querySelectorAll('.ip-shot-refine-btn').forEach(btn => {
+      btn.onclick = () => {
+        const idx = parseInt(btn.dataset.idx);
+        const shot = shots[idx];
+        if (!shot) return;
+        const _pick = (s) => s ? ({ shot_id: s.shot_id, scene_description: s.scene_description, character_action: s.character_action, dialogue: s.dialogue, mood: s.mood, generation_prompt: s.generation_prompt, duration: s.duration, shot_type: s.shot_type, characters_in_shot: s.characters_in_shot }) : null;
+        const content = {
+          target_shot: {
+            shot_id: shot.shot_id,
+            scene_description: shot.scene_description,
+            character_action: shot.character_action,
+            dialogue: shot.dialogue,
+            mood: shot.mood,
+            generation_prompt: shot.generation_prompt,
+            duration: shot.duration,
+            shot_type: shot.shot_type,
+            camera_movement: shot.camera_movement,
+            characters_in_shot: shot.characters_in_shot,
+            focal_character: shot.focal_character,
+          },
+          prev_shot: _pick(shots[idx - 1]),
+          next_shot: _pick(shots[idx + 1]),
+          story_outline_synopsis: ipStoryOutline ? (ipStoryOutline.synopsis || '') : '',
+          total_shots: shots.length,
+          shot_position: `${idx + 1}/${shots.length}`,
+        };
+        showRefinePopup('storyboard_shot', content, (result) => {
+          if (typeof result === 'object') {
+            const updated = result.target_shot || result;
+            Object.assign(shots[idx], updated);
+            shots[idx]._scene_zh = ''; shots[idx]._dialogue_zh = '';
+            shots[idx]._prompt_zh = ''; shots[idx]._action_zh = '';
+            _ipStoryboardTranslated = false;
+            _renderStoryboardTable(container);
+            // 持久化润色结果
+            if (_ipLastStoryboardTaskId) {
+              api(`/api/task/${_ipLastStoryboardTaskId}/storyboard`, { method: 'PUT', json: true, body: { shots: [{ _index: idx, ...updated }] } }).catch(() => {});
+            }
+            showToast('分镜已更新', 'success');
+          }
+        }, 'storyboard');
+      };
+    });
+
+    // 更新 Step 5 的预计视频时长
+    const durEl = $('#ip-estimated-duration');
+    if (durEl) {
+      const mins = Math.floor(totalDur / 60);
+      const secs = Math.round(totalDur % 60);
+      const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
+      durEl.textContent = `预计视频时长：${timeStr}（${shots.length} 个镜头，总计 ${totalDur.toFixed(1)}s）`;
+      durEl.classList.remove('hidden');
+    }
+  }
+
+  const _RUN_STATUS_MAP = { done: '✅ 完成', failed: '❌ 失败', cancelled: '⏹ 已取消', generating: '⏳ 生成中', generating_video: '⏳ 视频生成中', generating_storyboard: '⏳ 分镜生成中', pending: '⏳ 等待中', loading: '⏳ 加载中', storyboard_ready: '⏳ 分镜就绪', unknown: '❓ 未知' };
+
+  function _renderIPVideoRuns() {
+    const container = $('#ip-video-runs');
+    if (!container) return;
+    if (!_ipVideoRuns.length) { container.innerHTML = ''; return; }
+    let html = '<div style="margin-bottom:8px;font-weight:600;font-size:0.9em;">生成记录</div>';
+    _ipVideoRuns.forEach((run, i) => {
+      const statusText = _RUN_STATUS_MAP[run.status] || `⏳ ${run.status}`;
+      const canResume = (run.status === 'failed' || run.status === 'cancelled') && run._has_segments;
+      const canView = !['loading', 'pending'].includes(run.status);
+      const canFeedback = run.status === 'done';
+
+      const isActive = ['generating', 'generating_video', 'generating_storyboard', 'pending'].includes(run.status);
+
+      let btns = '';
+      if (canView && !isActive) btns += `<button type="button" class="ghost sm ip-run-toggle" data-idx="${i}" style="font-size:0.75em;padding:2px 8px;">📂 查看</button>`;
+      if (canResume) btns += `<button type="button" class="ghost sm ip-run-resume" data-idx="${i}" style="font-size:0.75em;padding:2px 8px;">▶ 继续生成</button>`;
+      if (isActive) btns += `<button type="button" class="ghost sm ip-run-stop" data-idx="${i}" style="font-size:0.75em;padding:2px 8px;color:var(--danger);">⏹ 终止</button>`;
+      if (canFeedback) btns += `<button type="button" class="ghost sm ip-run-feedback" data-idx="${i}" style="font-size:0.75em;padding:2px 8px;">💬 反馈</button>`;
+
+      html += `<div class="ip-run-block" data-idx="${i}" style="border-bottom:1px solid var(--border);padding:6px 0;">
+        <div style="display:flex;align-items:center;gap:8px;font-size:0.85em;">
+          <span style="font-weight:600;">#${i + 1}</span>
+          <span>${statusText}</span>
+          ${btns}
+        </div>
+        <div class="ip-run-detail" data-idx="${i}" style="display:none;margin-top:8px;padding:8px 12px;background:var(--surface);border-radius:6px;font-size:0.82em;"></div>
+      </div>`;
+    });
+    container.innerHTML = html;
+
+    container.querySelectorAll('.ip-run-toggle').forEach(btn => {
+      btn.onclick = async () => {
+        const idx = parseInt(btn.dataset.idx);
+        const detail = container.querySelector(`.ip-run-detail[data-idx="${idx}"]`);
+        if (!detail) return;
+        if (detail.style.display !== 'none') {
+          detail.style.display = 'none';
+          btn.textContent = '📂 查看';
+          return;
+        }
+        btn.textContent = '⏳ 加载…';
+        btn.disabled = true;
+        await _loadRunDetailInline(detail, _ipVideoRuns[idx], idx);
+        detail.style.display = 'block';
+        btn.textContent = '📂 收起';
+        btn.disabled = false;
+      };
+    });
+
+    container.querySelectorAll('.ip-run-resume').forEach(btn => {
+      btn.onclick = () => {
+        const idx = parseInt(btn.dataset.idx);
+        _resumeIPVideoRun(idx);
+      };
+    });
+
+    container.querySelectorAll('.ip-run-feedback').forEach(btn => {
+      btn.onclick = () => {
+        const idx = parseInt(btn.dataset.idx);
+        const run = _ipVideoRuns[idx];
+        if (run) _showVideoFeedbackPopup(run, idx);
+      };
+    });
+
+    container.querySelectorAll('.ip-run-stop').forEach(btn => {
+      btn.onclick = async () => {
+        const idx = parseInt(btn.dataset.idx);
+        const run = _ipVideoRuns[idx];
+        if (!run) return;
+        btn.disabled = true; btn.textContent = '终止中…';
+        try {
+          await api(`/api/task/cancel/${run.task_id}`, { method: 'POST', json: true, body: {} });
+          showToast('已发送终止信号', 'success');
+          _ipVideoAppendLog('⏹ 已发送终止信号，等待当前段完成后停止…');
+        } catch (e) { showToast('终止失败: ' + e.message); btn.disabled = false; btn.textContent = '⏹ 终止'; }
+      };
+    });
+  }
+
+  async function _loadRunDetailInline(el, run, idx) {
+    el.innerHTML = '<div style="opacity:0.6;">加载中…</div>';
+    try {
+      const st = await api(`/api/task/${run.task_id}`);
+      let logHtml = '';
+
+      const progress = st.progress || [];
+      if (progress.length) {
+        const lines = progress.map(p => {
+          const t = p.t ? p.t.replace(/.*T/, '').replace(/\.\d+.*/, '') : '';
+          return `<div>[${escapeHtml(t)}] ${escapeHtml(p.msg)}</div>`;
+        });
+        logHtml += `<div style="max-height:150px;overflow-y:auto;margin-bottom:8px;padding:4px;background:var(--bg);border-radius:4px;">${lines.join('')}</div>`;
+      }
+      if (st.error) logHtml += `<div style="color:var(--danger);margin-bottom:8px;">❌ ${escapeHtml(st.error)}</div>`;
+
+      const segs = st.segments || [];
+      if (segs.length) {
+        logHtml += `<div style="margin-bottom:4px;font-weight:600;">片段（${segs.length}）</div>`;
+        logHtml += '<div class="segments-grid" style="margin-bottom:8px;">';
+        segs.forEach(seg => {
+          logHtml += `<div class="segment-thumb"><video src="${escapeAttr(seg.url)}" muted playsinline preload="metadata"></video><div class="seg-label">${escapeHtml(seg.name)}</div></div>`;
+        });
+        logHtml += '</div>';
+      }
+
+      if (st.output_url) {
+        logHtml += `<div style="margin-bottom:4px;font-weight:600;">成片</div>`;
+        logHtml += `<video src="${escapeAttr(st.output_url)}" controls style="width:100%;max-height:300px;border-radius:6px;"></video>`;
+        logHtml += `<div style="margin-top:4px;"><a class="btn primary sm" href="${escapeAttr(st.output_url)}" download>⬇ 下载 MP4</a></div>`;
+      }
+
+      if (!progress.length && !st.error && !segs.length && !st.output_url) {
+        logHtml = '<div style="opacity:0.6;">（无数据）</div>';
+      }
+
+      el.innerHTML = logHtml;
+
+      el.querySelectorAll('.segment-thumb video').forEach(v => {
+        v.onmouseenter = function() { this.play(); };
+        v.onmouseleave = function() { this.pause(); this.currentTime = 0; };
+      });
+    } catch (e) {
+      el.innerHTML = `<div style="color:var(--danger);">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function _showVideoFeedbackPopup(run, runIdx) {
+    const existing = document.querySelector('.refine-popup-global');
+    if (existing) existing.remove();
+    const popup = document.createElement('div');
+    popup.className = 'refine-popup-global';
+    popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:200;width:min(500px,90vw);background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+    popup.innerHTML = `
+      <h4 style="margin:0 0 12px;">视频反馈 · #${runIdx + 1}</h4>
+      <p style="font-size:0.85em;opacity:0.7;margin:0 0 8px;">观看视频后，提交您的评价和改进建议。这些反馈将用于优化后续生成。</p>
+      <textarea placeholder="例如：节奏太快/画面切换太频繁/角色表情不够生动/对白配音不自然…" style="min-height:80px;"></textarea>
+      <div class="flex" style="margin-top:12px;justify-content:flex-end;">
+        <button type="button" class="primary sm" id="vfb-submit">提交反馈</button>
+        <button type="button" class="ghost sm" id="vfb-cancel">取消</button>
+      </div>
+    `;
+    document.body.appendChild(popup);
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:199;';
+    document.body.appendChild(overlay);
+    const close = () => { popup.remove(); overlay.remove(); };
+    overlay.onclick = close;
+    popup.querySelector('#vfb-cancel').onclick = close;
+    popup.querySelector('#vfb-submit').onclick = () => {
+      const feedback = popup.querySelector('textarea').value.trim();
+      if (!feedback) { showToast('请输入反馈内容'); return; }
+      _recordFeedback('video', `video_run_${runIdx + 1}`, feedback, `task_id: ${run.task_id}`, '');
+      close();
+    };
+  }
+
+  let _ipTaskSSE = null;
+  let _ipVideoProgressLines = [];
+  let _ipVideoSegmentPollTimer = null;
+  let _ipActiveVideoTaskId = null;
+
+  function _connectIPTaskSSE(taskId, statusDiv, btn, btnLabel, onDone, onFail, opts) {
+    const terminalStates = (opts && opts.terminal) || ['done', 'failed', 'cancelled', 'storyboard_ready'];
+    if (_ipTaskSSE) { _ipTaskSSE.close(); _ipTaskSSE = null; }
+    const es = new EventSource(`/api/task/stream/${taskId}`);
+    _ipTaskSSE = es;
+
+    const logWrap = $('#ip-progress-log-wrap');
+    const logEl = $('#ip-progress-log');
+    const barWrap = $('#ip-gen-progress-wrap');
+    const bar = $('#ip-gen-progress-bar');
+    if (logWrap) logWrap.classList.remove('hidden');
+    _ipVideoProgressLines = [];
+
+    _startIPSegmentPoll(taskId);
+
+    const _handleTerminal = (status, error) => {
+      es.close(); _ipTaskSSE = null;
+      _stopIPSegmentPoll();
+      btn.disabled = false;
+      if (status === 'done') {
+        statusDiv.textContent = '生成完成';
+        showToast('任务完成', 'success');
+        _ipVideoAppendLog('✅ 任务完成');
+      } else if (status === 'storyboard_ready') {
+        statusDiv.textContent = '分镜就绪';
+        showToast('分镜生成完成', 'success');
+        _ipVideoAppendLog('✅ 分镜就绪');
+        if (barWrap) { barWrap.classList.remove('hidden'); bar.style.width = '100%'; }
+        _refreshIPSegmentsAndOutput(taskId);
+        if (onDone) onDone();
+      } else if (status === 'failed') {
+        statusDiv.textContent = `生成失败: ${error || '未知错误'}`;
+        showToast('任务失败: ' + (error || ''), 'error');
+        _ipVideoAppendLog(`❌ 失败: ${error || '未知错误'}`);
+        _refreshIPSegmentsAndOutput(taskId);
+        if (onFail) onFail(error);
+      } else {
+        statusDiv.textContent = '任务已取消';
+        _ipVideoAppendLog('⏹ 任务已取消');
+        _refreshIPSegmentsAndOutput(taskId);
+        if (onFail) onFail('cancelled');
+      }
+      _updateIPGenButton();
+    };
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'progress') {
+          const msg = data.msg || '生成中…';
+          statusDiv.textContent = msg;
+          _ipVideoAppendLog(msg);
+        } else if (data.type === 'snapshot' || data.type === 'status') {
+          if (data.type === 'snapshot' && data.progress && data.progress.length) {
+            data.progress.forEach(p => {
+              _ipVideoAppendLog(p.msg || '');
+            });
+            const lastMsg = data.progress[data.progress.length - 1];
+            if (lastMsg && lastMsg.msg) statusDiv.textContent = lastMsg.msg;
+          }
+          if (data.segments_total && data.segments_done !== undefined) {
+            if (barWrap) {
+              barWrap.classList.remove('hidden');
+              bar.style.width = `${Math.round((data.segments_done / data.segments_total) * 100)}%`;
+            }
+          }
+          if (terminalStates.includes(data.status)) {
+            _handleTerminal(data.status, data.error);
+          } else if (data.status) {
+            const _st = _RUN_STATUS_MAP[data.status];
+            if (_st) statusDiv.textContent = _st;
+          }
+        }
+      } catch {}
+    };
+    es.onerror = () => {
+      es.close(); _ipTaskSSE = null;
+      _stopIPSegmentPoll();
+      btn.disabled = false;
+      _updateIPGenButton();
+    };
+  }
+
+  let _ipLastLogMsg = '';
+  function _ipVideoAppendLog(msg) {
+    const logEl = $('#ip-progress-log');
+    if (!logEl || !msg) return;
+    if (msg === _ipLastLogMsg) return;
+    _ipLastLogMsg = msg;
+    const now = new Date();
+    const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+    _ipVideoProgressLines.push(`[${ts}] ${msg}`);
+    if (_ipVideoProgressLines.length > 200) _ipVideoProgressLines = _ipVideoProgressLines.slice(-150);
+    logEl.innerHTML = _ipVideoProgressLines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function _startIPSegmentPoll(taskId) {
+    _stopIPSegmentPoll();
+    _ipVideoSegmentPollTimer = setInterval(async () => {
+      try {
+        const st = await api(`/api/task/${taskId}`);
+        _renderIPSegments(st.segments || []);
+        if (st.output_url) _showIPOutputVideo(st.output_url);
+        if (st.segments_total && st.segments_done !== undefined) {
+          const bar = $('#ip-gen-progress-bar');
+          const barWrap = $('#ip-gen-progress-wrap');
+          if (barWrap) { barWrap.classList.remove('hidden'); bar.style.width = `${Math.round((st.segments_done / st.segments_total) * 100)}%`; }
+        }
+      } catch {}
+    }, 8000);
+  }
+  function _stopIPSegmentPoll() {
+    if (_ipVideoSegmentPollTimer) { clearInterval(_ipVideoSegmentPollTimer); _ipVideoSegmentPollTimer = null; }
+  }
+
+  function _renderIPSegments(segments) {
+    const grid = $('#ip-segments-grid');
+    const section = $('#ip-segments-section');
+    if (!grid || !section) return;
+    if (!segments || !segments.length) { section.classList.add('hidden'); return; }
+    section.classList.remove('hidden');
+    grid.innerHTML = '';
+    segments.forEach(seg => {
+      const wrap = document.createElement('div');
+      wrap.className = 'segment-thumb';
+      wrap.innerHTML = `<video src="${escapeAttr(seg.url)}" muted playsinline preload="metadata"></video>
+        <div class="seg-label">${escapeHtml(seg.name)}</div>`;
+      wrap.querySelector('video').onmouseenter = function() { this.play(); };
+      wrap.querySelector('video').onmouseleave = function() { this.pause(); this.currentTime = 0; };
+      grid.appendChild(wrap);
+    });
+  }
+
+  function _showIPOutputVideo(url) {
+    const wrap = $('#ip-output-wrap');
+    const vid = $('#ip-output-video');
+    const dl = $('#ip-download-link');
+    if (!wrap || !vid) return;
+    wrap.classList.remove('hidden');
+    if (vid.src !== url) vid.src = url;
+    if (dl) dl.href = url;
+  }
+
+  async function _refreshIPSegmentsAndOutput(taskId) {
+    try {
+      const st = await api(`/api/task/${taskId}`);
+      _renderIPSegments(st.segments || []);
+      if (st.output_url) _showIPOutputVideo(st.output_url);
+    } catch {}
+  }
+
+  async function _loadIPVideoRunDetail(run, runIdx) {
+    const logWrap = $('#ip-progress-log-wrap');
+    const logEl = $('#ip-progress-log');
+    if (logWrap) logWrap.classList.remove('hidden');
+    _ipVideoProgressLines = [`⏳ 正在加载 #${runIdx + 1} 的详情…`];
+    if (logEl) logEl.innerHTML = `<div>${escapeHtml(_ipVideoProgressLines[0])}</div>`;
+
+    try {
+      const st = await api(`/api/task/${run.task_id}`);
+
+      _ipVideoProgressLines = [];
+      const progress = st.progress || [];
+      progress.forEach(p => {
+        const t = p.t ? p.t.replace(/.*T/, '').replace(/\.\d+.*/, '') : '';
+        _ipVideoProgressLines.push(`[${t}] ${p.msg}`);
+      });
+      if (st.error) _ipVideoProgressLines.push(`❌ 错误: ${st.error}`);
+      if (!progress.length && !st.error) _ipVideoProgressLines.push('（无进度记录）');
+
+      if (logEl) {
+        logEl.innerHTML = _ipVideoProgressLines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      _renderIPSegments(st.segments || []);
+      if (st.output_url) {
+        _showIPOutputVideo(st.output_url);
+      } else {
+        const outWrap = $('#ip-output-wrap');
+        if (outWrap) outWrap.classList.add('hidden');
+      }
+
+      // 更新进度条
+      const barWrap = $('#ip-gen-progress-wrap');
+      const bar = $('#ip-gen-progress-bar');
+      if (barWrap && st.segments_total) {
+        barWrap.classList.remove('hidden');
+        const pct = st.status === 'done' ? 100 : Math.round(((st.segments_done || 0) / st.segments_total) * 100);
+        bar.style.width = `${pct}%`;
+      } else if (barWrap) {
+        barWrap.classList.add('hidden');
+      }
+    } catch (e) {
+      _ipVideoProgressLines = [`❌ 加载失败: ${e.message}`];
+      if (logEl) logEl.innerHTML = `<div>${escapeHtml(_ipVideoProgressLines[0])}</div>`;
+    }
+  }
+
+  async function _persistIPVideoTaskIds() {
+    if (!currentIPId || !_ipVideoRuns.length) return;
+    const ids = _ipVideoRuns.map(r => r.task_id);
+    try {
+      await api(`/api/ip/${currentIPId}/video-tasks`, { method: 'PUT', json: true, body: { task_ids: ids } });
+    } catch {}
+  }
+
+  function _updateIPGenButton() {
+    const btn = $('#btn-ip-gen-video');
+    if (!btn) return;
+    btn.textContent = '开始生成';
+  }
+
+  async function _resumeIPVideoRun(runIdx) {
+    const run = _ipVideoRuns[runIdx];
+    if (!run) return;
+    const btn = $('#btn-ip-gen-video');
+    if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+    const statusDiv = $('#ip-video-status');
+    if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = `#${runIdx + 1} 续跑中…`; }
+
+    _ipVideoProgressLines = [];
+    const logWrap = $('#ip-progress-log-wrap');
+    if (logWrap) logWrap.classList.remove('hidden');
+    const logEl = $('#ip-progress-log');
+    if (logEl) logEl.innerHTML = '';
+    const barWrap = $('#ip-gen-progress-wrap');
+    const bar = $('#ip-gen-progress-bar');
+    if (barWrap) { barWrap.classList.add('hidden'); bar.style.width = '0%'; }
+
+    try {
+      const voiceMode = ($('#ip-voice-mode') || {}).value || 'native';
+      const resolution = ($('#ip-gen-resolution') || {}).value || '720*1280';
+      const data = await api('/api/task/ip-theme', {
+        method: 'POST', json: true,
+        body: {
+          ip_id: currentIPId,
+          theme_hint: ($('#ip-theme-hint') || {}).value || '',
+          min_shots: parseInt(($('#ip-min-shots') || {}).value || '8'),
+          max_shots: parseInt(($('#ip-max-shots') || {}).value || '16'),
+          generate_video: true,
+          story_outline: ipStoryOutline,
+          voice_mode: voiceMode,
+          resolution: resolution,
+          resume_task_id: run.task_id,
+        },
+      });
+      run.status = 'generating';
+      run.output_url = '';
+      _ipActiveVideoTaskId = data.task_id;
+      _renderIPVideoRuns();
+      _persistIPVideoTaskIds();
+      if (statusDiv) statusDiv.textContent = `#${runIdx + 1} 正在续跑视频…`;
+
+      _connectIPTaskSSE(data.task_id, statusDiv, btn, '开始生成', async () => {
+        try {
+          const st = await api(`/api/task/${data.task_id}`);
+          run.status = st.status || 'done';
+          run.output_url = st.output_url || '';
+          run._has_segments = !!(st.segments && st.segments.length);
+        } catch { run.status = 'done'; }
+        _ipActiveVideoTaskId = null;
+        _renderIPVideoRuns();
+        _persistIPVideoTaskIds();
+      }, (err) => {
+        run.status = err === 'cancelled' ? 'cancelled' : 'failed';
+        _ipActiveVideoTaskId = null;
+        _renderIPVideoRuns();
+        _persistIPVideoTaskIds();
+      }, { terminal: ['done', 'failed', 'cancelled'] });
+    } catch (e) {
+      showToast('续跑失败: ' + e.message);
+      if (statusDiv) statusDiv.textContent = '续跑失败';
+      if (btn) { btn.disabled = false; btn.textContent = '开始生成'; }
+    }
+  }
+
+  async function _restoreIPVideoRuns(taskIds) {
+    _ipVideoRuns = taskIds.map(tid => ({ task_id: tid, status: 'loading', output_url: '', created: '' }));
+    _renderIPVideoRuns();
+    const promises = taskIds.map(async (tid, i) => {
+      try {
+        const st = await api(`/api/task/${tid}`);
+        let status = st.status || 'unknown';
+        const hasSegments = (st.segments && st.segments.length > 0);
+        if (['generating', 'generating_video', 'generating_storyboard', 'pending'].includes(status) && !st.is_running) {
+          status = st.output_url ? 'done' : hasSegments ? 'cancelled' : 'failed';
+        }
+        _ipVideoRuns[i].status = status;
+        _ipVideoRuns[i].output_url = st.output_url || '';
+        _ipVideoRuns[i]._has_segments = hasSegments;
+      } catch {
+        _ipVideoRuns[i].status = 'unknown';
+      }
+    });
+    await Promise.all(promises);
+    _renderIPVideoRuns();
+
+    // 自动加载最后一个有成片的记录的段/视频
+    for (let i = _ipVideoRuns.length - 1; i >= 0; i--) {
+      if (_ipVideoRuns[i].output_url) {
+        await _refreshIPSegmentsAndOutput(_ipVideoRuns[i].task_id);
+        break;
+      }
+      if (_ipVideoRuns[i].status === 'generating' || _ipVideoRuns[i].status === 'generating_video') {
+        _startIPSegmentPoll(_ipVideoRuns[i].task_id);
+        break;
+      }
+    }
+  }
+
+  function _calcShotCount() {
+    const mins = parseFloat(($('#ip-target-min') || {}).value) || 0;
+    const secs = parseFloat(($('#ip-target-sec') || {}).value) || 0;
+    const totalSec = mins * 60 + secs;
+    const avgDur = parseFloat(($('#ip-avg-shot-dur') || {}).value) || 2.5;
+    const ideal = Math.round(totalSec / avgDur);
+    const minS = Math.max(3, ideal - 2);
+    const maxS = ideal + 2;
+    if ($('#ip-min-shots')) $('#ip-min-shots').value = minS;
+    if ($('#ip-max-shots')) $('#ip-max-shots').value = maxS;
+    if ($('#ip-shot-calc')) $('#ip-shot-calc').textContent = `${ideal} 镜 (${minS}~${maxS})，总计约 ${totalSec}s`;
+    return { minS, maxS, avgDur, totalSec };
+  }
+  ['ip-target-min', 'ip-target-sec', 'ip-avg-shot-dur'].forEach(id => {
+    const el = $('#' + id);
+    if (el) el.oninput = _calcShotCount;
+  });
+  _calcShotCount();
+
   if ($('#btn-ip-gen-storyboard')) {
     $('#btn-ip-gen-storyboard').onclick = async () => {
       if (!currentIPId) return;
       const btn = $('#btn-ip-gen-storyboard');
-      const minShots = parseInt(($('#ip-min-shots') || {}).value || '8');
-      const maxShots = parseInt(($('#ip-max-shots') || {}).value || '16');
+      const { avgDur, totalSec } = _calcShotCount();
+      const minShots = parseInt(($('#ip-min-shots') || {}).value) || 8;
+      const maxShots = parseInt(($('#ip-max-shots') || {}).value) || 16;
       btn.disabled = true; btn.textContent = '生成中…';
       const statusDiv = $('#ip-storyboard-status');
       statusDiv.classList.remove('hidden');
@@ -2698,43 +3756,120 @@
             max_shots: maxShots,
             generate_video: false,
             story_outline: ipStoryOutline,
+            avg_shot_duration: avgDur,
+            target_duration: totalSec,
+            dialogue_mode: ($('#ip-dialogue-mode') || {}).value || 'normal',
           },
         });
-        showToast(`分镜任务已创建: ${data.task_id}`, 'success');
-        statusDiv.textContent = `任务 ${data.task_id} 正在生成…`;
-        // Unlock step 5
-        const step5El = $('#ip-steps-bar [data-step="5"]');
-        if (step5El) { step5El.classList.remove('disabled'); }
-      } catch (e) { showToast('分镜生成失败: ' + e.message); statusDiv.textContent = '分镜生成失败'; }
-      btn.disabled = false; btn.textContent = '生成 IP 分镜';
+        statusDiv.textContent = '正在生成分镜…';
+        _ipLastStoryboardTaskId = data.task_id;
+        _connectIPTaskSSE(data.task_id, statusDiv, btn, '生成 IP 分镜', async () => {
+          await _loadIPStoryboardPreview(data.task_id);
+          if (ipStoryOutline) {
+            ipStoryOutline._last_storyboard_task_id = data.task_id;
+            api('/api/ip/' + currentIPId + '/outline', { method: 'PUT', json: true, body: { outline: ipStoryOutline } }).catch(() => {});
+          }
+          ipSetStep(5);
+        });
+      } catch (e) { showToast('分镜生成失败: ' + e.message); statusDiv.textContent = '分镜生成失败'; btn.disabled = false; btn.textContent = '生成 IP 分镜'; }
     };
   }
 
   // ── Step 5: 生成视频 ──
+  if ($('#ip-voice-mode')) {
+    const _updateVoiceHint = () => {
+      const hint = $('#ip-voice-mode-hint');
+      if (!hint) return;
+      const v = $('#ip-voice-mode').value;
+      if (v === 'native') hint.textContent = '万相直接配音，需角色上传参考音频（克隆模式）。预置音色在此模式下不生效。';
+      else if (v === 'pipeline') {
+        let voiceInfo = '';
+        if (currentIPData && currentIPData.characters) {
+          const parts = currentIPData.characters.map(c => {
+            const vp = c.voice_profile || {};
+            if (vp.mode === 'preset') return `${c.name}: 预置·${vp.preset_name || vp.preset_id}`;
+            if (vp.mode === 'clone') return `${c.name}: 克隆音色`;
+            return `${c.name}: 未设置`;
+          });
+          voiceInfo = ' 当前音色：' + parts.join('，');
+        }
+        hint.textContent = '先生成静音视频，再用 CosyVoice TTS 按对白配音。使用第2步为每个角色设置的音色。' + voiceInfo;
+      } else hint.textContent = '生成纯画面视频，不包含任何语音。';
+    };
+    $('#ip-voice-mode').onchange = _updateVoiceHint;
+    _updateVoiceHint();
+  }
+
   if ($('#btn-ip-gen-video')) {
     $('#btn-ip-gen-video').onclick = async () => {
       if (!currentIPId) return;
       const btn = $('#btn-ip-gen-video');
-      const minShots = parseInt(($('#ip-min-shots') || {}).value || '8');
-      const maxShots = parseInt(($('#ip-max-shots') || {}).value || '16');
       btn.disabled = true; btn.textContent = '生成中…';
+      const statusDiv = $('#ip-video-status');
+      statusDiv.classList.remove('hidden');
+      statusDiv.textContent = '正在创建视频生成任务…';
+
+      // 清空上一轮的日志/段预览/输出
+      _ipVideoProgressLines = [];
+      const logEl = $('#ip-progress-log');
+      if (logEl) logEl.innerHTML = '';
+      const barWrap = $('#ip-gen-progress-wrap');
+      const bar = $('#ip-gen-progress-bar');
+      if (barWrap) { barWrap.classList.add('hidden'); bar.style.width = '0%'; }
+      const segSection = $('#ip-segments-section');
+      if (segSection) segSection.classList.add('hidden');
+      const outWrap = $('#ip-output-wrap');
+      if (outWrap) outWrap.classList.add('hidden');
+
       try {
         const voiceMode = ($('#ip-voice-mode') || {}).value || 'native';
+        const resolution = ($('#ip-gen-resolution') || {}).value || '720*1280';
+
+        const reqBody = {
+          ip_id: currentIPId,
+          theme_hint: ($('#ip-theme-hint') || {}).value || '',
+          min_shots: parseInt(($('#ip-min-shots') || {}).value || '8'),
+          max_shots: parseInt(($('#ip-max-shots') || {}).value || '16'),
+          generate_video: true,
+          story_outline: ipStoryOutline,
+          voice_mode: voiceMode,
+          resolution: resolution,
+        };
+        if (_ipLastStoryboardTaskId) reqBody.resume_task_id = _ipLastStoryboardTaskId;
         const data = await api('/api/task/ip-theme', {
           method: 'POST', json: true,
-          body: {
-            ip_id: currentIPId,
-            theme_hint: ($('#ip-theme-hint') || {}).value || '',
-            min_shots: minShots,
-            max_shots: maxShots,
-            generate_video: true,
-            story_outline: ipStoryOutline,
-            voice_mode: voiceMode,
-          },
+          body: reqBody,
         });
-        showToast(`视频生成任务已创建: ${data.task_id}`, 'success');
-      } catch (e) { showToast('视频生成失败: ' + e.message); }
-      btn.disabled = false; btn.textContent = '生成视频';
+
+        const activeRunIdx = _ipVideoRuns.length;
+        _ipVideoRuns.push({ task_id: data.task_id, status: 'generating', output_url: '', created: new Date().toLocaleTimeString() });
+        _ipActiveVideoTaskId = data.task_id;
+        _renderIPVideoRuns();
+        _persistIPVideoTaskIds();
+        statusDiv.textContent = `#${activeRunIdx + 1} 正在生成视频…`;
+
+        _connectIPTaskSSE(data.task_id, statusDiv, btn, '开始生成', async () => {
+          try {
+            const st = await api(`/api/task/${data.task_id}`);
+            _ipVideoRuns[activeRunIdx].status = st.status || 'done';
+            _ipVideoRuns[activeRunIdx].output_url = st.output_url || '';
+            _ipVideoRuns[activeRunIdx]._has_segments = !!(st.segments && st.segments.length);
+          } catch { _ipVideoRuns[activeRunIdx].status = 'done'; }
+          _ipActiveVideoTaskId = null;
+          _renderIPVideoRuns();
+          _persistIPVideoTaskIds();
+        }, (err) => {
+          _ipVideoRuns[activeRunIdx].status = err === 'cancelled' ? 'cancelled' : 'failed';
+          _ipActiveVideoTaskId = null;
+          _renderIPVideoRuns();
+          _persistIPVideoTaskIds();
+        }, { terminal: ['done', 'failed', 'cancelled'] });
+      } catch (e) {
+        showToast('视频生成失败: ' + e.message);
+        statusDiv.textContent = '任务创建失败';
+        btn.disabled = false;
+        _updateIPGenButton();
+      }
     };
   }
 
@@ -2997,15 +4132,15 @@
   if ($('#btn-close-ip-manage')) $('#btn-close-ip-manage').onclick = () => closeDrawer('ip-manage');
   if ($('#overlay-ip-manage')) $('#overlay-ip-manage').onclick = () => closeDrawer('ip-manage');
 
-  // ── AI 润色弹窗（通用） ──
-  function showRefinePopup(section, currentContent, onResult) {
+  // ── 修改润色弹窗（通用） ──
+  function showRefinePopup(section, currentContent, onResult, phase) {
     const existing = document.querySelector('.refine-popup-global');
     if (existing) existing.remove();
     const popup = document.createElement('div');
     popup.className = 'refine-popup-global';
     popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:200;width:min(500px,90vw);background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
     popup.innerHTML = `
-      <h4 style="margin:0 0 12px;">AI 润色</h4>
+      <h4 style="margin:0 0 12px;">修改润色</h4>
       <textarea placeholder="输入修改意见…" style="min-height:80px;"></textarea>
       <div class="flex" style="margin-top:12px;justify-content:flex-end;">
         <button type="button" class="primary sm" id="refine-go">润色</button>
@@ -3031,8 +4166,22 @@
         });
         close();
         if (onResult) onResult(data.result);
+        _recordFeedback(phase || 'proposal', section, instruction, currentContent, data.result);
       } catch (e) { showToast('润色失败: ' + e.message); goBtn.disabled = false; goBtn.textContent = '润色'; }
     };
+  }
+
+  function _recordFeedback(phase, section, instruction, before, after) {
+    if (!currentIPId) return;
+    const beforeSnap = typeof before === 'object' ? JSON.stringify(before).slice(0, 500) : String(before).slice(0, 500);
+    const afterSnap = typeof after === 'object' ? JSON.stringify(after).slice(0, 500) : String(after).slice(0, 500);
+    api('/api/ip/' + currentIPId + '/feedback', {
+      method: 'POST', json: true,
+      body: { phase, section, instruction, before_snapshot: beforeSnap, after_snapshot: afterSnap, accepted: true },
+    }).then(resp => {
+      if (resp.auto_distilled) showToast('已记录反馈并更新创作指南', 'success');
+      else showToast('已记录反馈', 'success');
+    }).catch(() => {});
   }
 
   // ── 初始化 ───────────────────────────────────────────────────────────────────

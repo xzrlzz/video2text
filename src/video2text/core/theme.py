@@ -679,7 +679,8 @@ LANGUAGE RULE (ABSOLUTE — ZERO EXCEPTIONS):
       "visual_focus": "What is the CENTER of the frame?"
     }
   ],
-  "emotional_arc_summary": "How emotion builds and resolves in this 15-30 second story."
+  "emotional_arc_summary": "How emotion builds and resolves in this 15-30 second story.",
+  "recommended_shot_count": 8
 }
 
 STORY QUALITY FOR SHORT-FORM:
@@ -689,7 +690,22 @@ STORY QUALITY FOR SHORT-FORM:
 4. VISUAL VARIETY: Mix close-ups (expressions), medium shots (action), wide shots (reaction).
 5. CHARACTER-DRIVEN: The humor/emotion comes FROM the characters' established quirks.
 
-BEAT COUNT: 4-8 beats for a 15-30 second video. Each beat = 2-3 seconds of screen time."""
+BEAT COUNT: 4-8 beats for a 15-30 second video. Each beat = 2-3 seconds of screen time.
+
+DIALOGUE GUIDELINES:
+- At least 30-50% of beats SHOULD include character dialogue (even short exclamations, reactions, or quips).
+- Dialogue brings characters to life and is needed for TTS voice pipelines.
+- Even in visually-driven stories, characters should vocalize: gasps, exclamations ("No no no!"), one-liners, or brief exchanges.
+- Use the format: 'Speaker: "Line."' — keep lines short and punchy for short-form content.
+- If the story genuinely works better as pure visual comedy (like a silent film), dialogue can be omitted, but this should be rare.
+
+recommended_shot_count: Based on the narrative complexity and beat count, suggest an ideal number of shots for the shot designer phase. Typically 1-2x the beat count. For simple stories use fewer shots; for complex visual sequences use more.
+
+CONTENT SAFETY (ABSOLUTE):
+1. All characters, scenes, and dialogue must be ORIGINAL and free of copyrighted references.
+2. No violence beyond slapstick comedy. No blood, weapons, or threatening scenarios.
+3. No politically sensitive, discriminatory, or adult-only content.
+4. When the story involves conflict, keep it lighthearted and family-friendly."""
 
 
 IP_SHOT_DESIGNER_SYSTEM = """You are a professional storyboard director for SHORT-FORM viral video content. You are given a COMPLETED STORY OUTLINE for an IP episode, plus the IP's character roster and visual style. Your job is to EXECUTE this story as a shot list.
@@ -746,6 +762,18 @@ TIMING (SHORT-FORM — ULTRA FAST):
 - DIALOGUE shots get 3s max.
 - NEVER exceed 4s.
 - Prefer SMASH_CUT. Every shot must advance the story.
+
+DIALOGUE RULES:
+- If the story outline contains dialogue in its beats, FAITHFULLY include it in the corresponding shots.
+- Even if the outline omits dialogue, ADD natural character vocalizations to at least 30% of shots: exclamations, gasps, short reactions, quips, or brief exchanges.
+- Format: 'CHARACTER_NAME: "Spoken words."' — keep it short and punchy.
+- Dialogue-bearing shots should get slightly longer duration_sec (see TIMING rules).
+- Only leave dialogue empty for purely atmospheric/transitional shots.
+
+CONTENT SAFETY (ABSOLUTE):
+1. generation_prompt must describe ORIGINAL characters only. Never reference existing copyrighted characters or real celebrities.
+2. No violent, gory, sexual, or politically sensitive visual descriptions.
+3. negative_prompt_hint should include "copyrighted character, real person, violent, NSFW" by default.
 
 IP STYLE KEYWORDS TO APPEND:
 {style_keywords}"""
@@ -821,6 +849,10 @@ def _generate_ip_story_outline(
     else:
         user_msg += "Create an episode using one of the typical_plot_hooks as inspiration.\n\n"
 
+    if profile.creative_guidelines:
+        gl_lines = "\n".join(f"{i}. {g}" for i, g in enumerate(profile.creative_guidelines, 1))
+        user_msg += f"CREATIVE GUIDELINES (learned from past iterations):\n{gl_lines}\n\n"
+
     user_msg += (
         f"Design a mini-story with {max(3, min_shots * 2 // 3)}-{max_shots} narrative beats.\n"
         f"Each beat = 2-3 seconds of screen time.\n"
@@ -846,10 +878,67 @@ def _generate_ip_shots_from_outline(
     model: str,
     min_shots: int,
     max_shots: int,
+    *,
+    avg_shot_duration: float = 2.5,
+    target_duration: float = 0,
+    dialogue_mode: str = "normal",
 ) -> dict[str, Any]:
     """Phase 2 (IP mode): 基于大纲和 IP 角色生成分镜。"""
     style_kw = profile.visual_dna.style_keywords_en or profile.visual_dna.style_keywords
     system = IP_SHOT_DESIGNER_SYSTEM.replace("{style_keywords}", style_kw)
+
+    # 动态替换 TIMING 规则（原始 system prompt 中有硬编码的 TIMING 段，直接替换掉）
+    target_text = f" (target total: {target_duration:.0f}s)" if target_duration > 0 else ""
+    timing_new = (
+        f"TIMING:\n"
+        f"- Target average duration per shot: {avg_shot_duration:.1f}s{target_text}\n"
+        f"- VARY duration_sec based on narrative pacing — do NOT make every shot the same:\n"
+        f"  * Quick reaction/cutaway shots: {max(1.0, avg_shot_duration - 1.5):.1f}-{max(1.5, avg_shot_duration - 0.5):.1f}s\n"
+        f"  * Standard action shots: {avg_shot_duration:.1f}s\n"
+        f"  * Dialogue or emotional beats: {avg_shot_duration + 0.5:.1f}-{min(avg_shot_duration + 2.0, 10.0):.1f}s\n"
+        f"  * Dramatic pauses or reveals: up to {min(avg_shot_duration + 3.0, 10.0):.1f}s\n"
+        f"- The TOTAL of all duration_sec should be approximately {target_duration:.0f}s.\n"
+        f"- Rhythm variation is critical for engagement. Prefer SMASH_CUT. Every shot must advance the story.\n"
+    )
+    old_timing = (
+        "TIMING (SHORT-FORM — ULTRA FAST):\n"
+        "- DEFAULT 2s for all non-dialogue shots.\n"
+        "- DIALOGUE shots get 3s max.\n"
+        "- NEVER exceed 4s.\n"
+        "- Prefer SMASH_CUT. Every shot must advance the story."
+    )
+    system = system.replace(old_timing, timing_new)
+
+    # 对白模式覆盖
+    _DLG_RULES_MARKER = "DIALOGUE RULES:"
+    if dialogue_mode == "silent":
+        dlg_override = (
+            "DIALOGUE RULES:\n"
+            "- ALL shots MUST have dialogue set to EMPTY STRING.\n"
+            "- This is a SILENT visual storytelling piece — no character speech at all.\n"
+            "- Convey all narrative through action, expression, and visual gags.\n"
+        )
+        if _DLG_RULES_MARKER in system:
+            old_dlg_block = system[system.index(_DLG_RULES_MARKER):]
+            old_dlg_block = old_dlg_block[:old_dlg_block.index("\n\n") + 1] if "\n\n" in old_dlg_block else old_dlg_block
+            system = system.replace(old_dlg_block, dlg_override)
+        else:
+            system += "\n" + dlg_override
+    elif dialogue_mode == "rich":
+        dlg_override = (
+            "DIALOGUE RULES:\n"
+            "- At least 60-70% of shots MUST include character dialogue.\n"
+            "- Characters should have frequent verbal exchanges, reactions, quips, and commentary.\n"
+            "- Include multi-character conversations where applicable.\n"
+            "- Format: 'CHARACTER_NAME: \"Spoken words.\"'\n"
+            "- Dialogue-bearing shots should get slightly longer duration_sec.\n"
+        )
+        if _DLG_RULES_MARKER in system:
+            old_dlg_block = system[system.index(_DLG_RULES_MARKER):]
+            old_dlg_block = old_dlg_block[:old_dlg_block.index("\n\n") + 1] if "\n\n" in old_dlg_block else old_dlg_block
+            system = system.replace(old_dlg_block, dlg_override)
+        else:
+            system += "\n" + dlg_override
 
     char_info = []
     for c in profile.characters:
@@ -862,9 +951,15 @@ def _generate_ip_shots_from_outline(
     outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
     char_json = json.dumps(char_info, ensure_ascii=False, indent=2)
 
+    gl_text = ""
+    if profile.creative_guidelines:
+        gl_lines = "\n".join(f"{i}. {g}" for i, g in enumerate(profile.creative_guidelines, 1))
+        gl_text = f"\nCREATIVE GUIDELINES (learned from past iterations):\n{gl_lines}\n"
+
     user_msg = (
         f"=== STORY OUTLINE ===\n{outline_json}\n=== END OUTLINE ===\n\n"
         f"=== IP CHARACTER VISUAL REFERENCE ===\n{char_json}\n=== END CHARACTERS ===\n\n"
+        f"{gl_text}"
         f"Design {min_shots}-{max_shots} shots. Use EXACT character names.\n"
         f"The generation_prompt for each shot MUST include the character's name_en "
         f"and key visual traits, followed by the IP style keywords.\n"
@@ -892,6 +987,9 @@ def generate_storyboard_from_ip(
     max_shots: int = 16,
     model: str | None = None,
     story_outline: dict[str, Any] | None = None,
+    avg_shot_duration: float = 2.5,
+    target_duration: float = 0,
+    dialogue_mode: str = "normal",
 ) -> StoryboardDocument:
     """IP 模式：两阶段流程生成分镜文档。
 
@@ -927,6 +1025,9 @@ def generate_storyboard_from_ip(
     log.info("IP Phase 2 — Shot Designer…")
     data = _generate_ip_shots_from_outline(
         outline, ip_profile, client, use_model, min_shots, max_shots,
+        avg_shot_duration=avg_shot_duration,
+        target_duration=target_duration,
+        dialogue_mode=dialogue_mode,
     )
 
     # Build document

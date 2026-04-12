@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _QUALITY_SUFFIX_ZH = "高清, 精致细节, 专业角色设计, 高品质渲染"
+_SAFETY_SUFFIX_ZH = "原创角色设计, 非任何已有作品角色"
+
 
 def build_character_image_prompt(
     character: IPCharacter,
@@ -33,7 +35,7 @@ def build_character_image_prompt(
 ) -> str:
     """构建角色参考图的文生图 prompt。
 
-    公式: [身份锚点] + [视觉描述] + [姿态] + [构图] + [背景] + [风格] + [质量]
+    公式: [身份锚点] + [视觉描述] + [姿态] + [构图] + [背景] + [风格] + [安全] + [质量]
     """
     parts: list[str] = []
 
@@ -49,6 +51,7 @@ def build_character_image_prompt(
     if style_kw:
         parts.append(style_kw)
 
+    parts.append(_SAFETY_SUFFIX_ZH)
     parts.append(_QUALITY_SUFFIX_ZH)
 
     return "。".join(parts) + "。"
@@ -140,8 +143,11 @@ def _generate_wan_image(
     result = ImageGeneration.wait(task=response, api_key=settings.dashscope_api_key)
 
     if result.output.task_status != "SUCCEEDED":
+        code = getattr(result.output, "code", "") or getattr(result, "code", "") or ""
+        msg = getattr(result.output, "message", "") or getattr(result, "message", "") or ""
+        detail = f" ({code}: {msg})" if code or msg else ""
         raise RuntimeError(
-            f"Image generation failed: status={result.output.task_status}"
+            f"Image generation failed: status={result.output.task_status}{detail}"
         )
 
     choices = getattr(result.output, "choices", None)

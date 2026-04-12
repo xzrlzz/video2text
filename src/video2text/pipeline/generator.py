@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+
+log = logging.getLogger(__name__)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -442,11 +445,12 @@ def _llm_match_characters(
         f"Character pool:\n{json.dumps(names)}\n\n"
         f"Shots text:\n{blob[:3000]}"
     )
+    from video2text.config.settings import resolve_light_model
     client = OpenAI(
         api_key=settings.dashscope_api_key,
         base_url=settings.base_url,
     )
-    model = resolve_theme_story_model(settings)
+    model = resolve_light_model(settings)
     completion = client.chat.completions.create(
         model=model,
         messages=[
@@ -1244,6 +1248,7 @@ def preflight_ip_character_voices(
             continue
         _, url, cert = check_and_upload_local(model, path, api_key, cert)
         result[char.id] = url
+        vp.reference_audio_url = url
 
     return result
 
@@ -1484,10 +1489,12 @@ def run_ip_storyboard_generation(
     """
     cb = progress_cb or (lambda _: None)
     effective_voice_mode = voice_mode or settings.voice_mode
+    log.info("IP 视频管线启动: %d 镜头, voice_mode=%s, size=%s", len(doc.shots), effective_voice_mode, size)
 
     # 预上传角色图
     cb("正在上传角色参考图…")
     char_url_map = preflight_ip_character_images(ip_profile.characters, settings)
+    log.info("角色参考图上传完成: %d 张", len(char_url_map))
     cb(f"已上传 {len(char_url_map)} 张角色参考图")
 
     # 预上传角色参考音频（native 模式 + 有克隆音频时）
@@ -1495,6 +1502,7 @@ def run_ip_storyboard_generation(
     if effective_voice_mode == "native":
         voice_url_map = preflight_ip_character_voices(ip_profile.characters, settings)
         if voice_url_map:
+            log.info("角色参考音频上传完成: %d 个", len(voice_url_map))
             cb(f"已上传 {len(voice_url_map)} 个角色参考音频")
 
     # 构建任务
@@ -1536,11 +1544,40 @@ def run_ip_storyboard_generation(
         raise CancellationError("用户取消了任务")
 
     _meta_lock = threading.Lock()
+    _active_segments: dict[int, str] = {}
+    _last_broadcast: str = ""
+
+    def _broadcast_progress() -> None:
+        """汇总所有并行段的状态，仅在内容变化时推送。"""
+        nonlocal _last_broadcast
+        with _meta_lock:
+            done_count = _count_valid_segments(segments_dir)
+            parts = []
+            for idx in sorted(_active_segments):
+                parts.append(f"段{idx+1}: {_active_segments[idx]}")
+            active_str = " | ".join(parts) if parts else ""
+        total = len(tasks)
+        summary = f"已完成 {done_count}/{total}"
+        if active_str:
+            summary += f"  ▶ {active_str}"
+        if summary != _last_broadcast:
+            _last_broadcast = summary
+            cb(summary)
 
     def run_one(t: WanClipTask) -> None:
         if cancel_event and cancel_event.is_set():
             raise CancellationError("用户取消了任务")
-        cb(f"IP 生成第 {t.index+1}/{len(tasks)} 段（约 {t.duration}s，{t.chunk_size} 镜）")
+        seg_label = f"段{t.index+1}"
+        log.info("IP 视频段 %d/%d 开始（约 %ds，%d 镜）", t.index+1, len(tasks), t.duration, t.chunk_size)
+
+        with _meta_lock:
+            _active_segments[t.index] = "提交中"
+        _broadcast_progress()
+
+        def _poll_cb(msg: str) -> None:
+            with _meta_lock:
+                _active_segments[t.index] = "渲染中"
+            _broadcast_progress()
 
         ref_u = t.reference_urls or None
         voice_u = t.reference_voice_url or None
@@ -1553,7 +1590,7 @@ def run_ip_storyboard_generation(
                 reference_voice_url=voice_u,
                 audio=t.audio,
                 size=size,
-                poll_callback=None,
+                poll_callback=_poll_cb,
             )
         else:
             url = generate_video_clip(
@@ -1561,19 +1598,26 @@ def run_ip_storyboard_generation(
                 t.duration,
                 settings,
                 size=size,
-                poll_callback=None,
+                poll_callback=_poll_cb,
             )
+        with _meta_lock:
+            _active_segments[t.index] = "下载中"
+        _broadcast_progress()
+
         seg_path = segments_dir / f"seg_{t.index:03d}.mp4"
         download_url(url, seg_path)
         with _meta_lock:
+            del _active_segments[t.index]
             if meta_update:
                 meta_update({"segments_done": _count_valid_segments(segments_dir)})
-        cb(f"第 {t.index + 1} 段已保存")
+        log.info("IP 视频段 %d/%d 完成", t.index+1, len(tasks))
+        _broadcast_progress()
 
     if pending_tasks:
         effective_workers = max(1, min(max_workers, len(pending_tasks)))
         if len(pending_tasks) > 1:
             cb(f"并发生成 {len(pending_tasks)} 个片段（并发数 {effective_workers}）…")
+            log.info("IP 视频并发生成 %d 段（并发数 %d）", len(pending_tasks), effective_workers)
         with ThreadPoolExecutor(max_workers=effective_workers) as ex:
             futs = [ex.submit(run_one, t) for t in pending_tasks]
             for fut in as_completed(futs):
@@ -1586,40 +1630,51 @@ def run_ip_storyboard_generation(
             f"片段数量不一致：期望 {len(tasks)}，实际 {len(valid_paths)}"
         )
 
+    log.info("所有视频段生成完成，开始拼接（%d 段）", len(valid_paths))
     cb("正在拼接最终视频…")
     silent_mp4 = output_mp4.with_suffix(".silent.mp4") if effective_voice_mode == "pipeline" else output_mp4
     try:
         concat_videos_ffmpeg(valid_paths, silent_mp4)
     except subprocess.CalledProcessError:
         reencode_concat(valid_paths, silent_mp4)
+    log.info("视频拼接完成: %s", silent_mp4.name)
 
     # Mode B：独立音频管线 — 生成 TTS 音频并合并
     if effective_voice_mode == "pipeline":
         try:
+            log.info("开始 TTS 音频管线（%d 个镜头）", len(doc.shots))
             cb("声音管线：生成 TTS 音频…")
             from video2text.pipeline.audio_align import build_chunk_audio
             from video2text.pipeline.composer import merge_audio_video
 
+            def _tts_cb(m: str) -> None:
+                cb(f"TTS: {m}")
+                log.info("TTS: %s", m)
+
             chunk_result = build_chunk_audio(
                 doc.shots, ip_profile, settings,
-                progress_cb=cb,
+                progress_cb=_tts_cb,
             )
 
             audio_path = segments_dir / "tts_audio.wav"
             audio_path.write_bytes(chunk_result.audio_data)
+            log.info("TTS 音频已生成（%dms）", chunk_result.duration_ms)
             cb(f"TTS 音频已生成（{chunk_result.duration_ms}ms）")
 
+            log.info("开始合并音视频")
             cb("合并音视频…")
             merge_audio_video(silent_mp4, audio_path, output_mp4, replace_audio=True)
             silent_mp4.unlink(missing_ok=True)
+            log.info("音视频合并完成: %s", output_mp4.name)
             cb(f"完成：{output_mp4.name}（含 TTS 音频）")
         except Exception as e:
-            log.warning("声音管线失败，使用静音视频: %s", e)
+            log.warning("声音管线失败，使用静音视频: %s", e, exc_info=True)
             cb(f"声音管线异常（{e}），使用静音视频")
             if silent_mp4 != output_mp4:
                 shutil.copy2(silent_mp4, output_mp4)
                 silent_mp4.unlink(missing_ok=True)
     else:
+        log.info("视频生成完成（无 TTS）: %s", output_mp4.name)
         cb(f"完成：{output_mp4.name}")
 
     return output_mp4

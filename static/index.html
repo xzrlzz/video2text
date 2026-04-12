@@ -6,7 +6,7 @@
   <title>video2text · 分镜与生成</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=20260414e" />
 </head>
 <body>
 
@@ -94,6 +94,8 @@
 
         <!-- Step 1: 选择/创建 IP -->
         <div class="ip-step-content" id="ip-step-1">
+          <div class="ip-step-header" data-toggle-step="1"><span class="ip-step-header-num">1</span> 选择 IP</div>
+          <div class="ip-step-body">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
             <label style="margin-bottom:0;">选择 IP</label>
             <div style="display:flex;gap:6px;">
@@ -117,11 +119,15 @@
             </div>
             <!-- IP 设定摘要（可编辑） -->
             <div id="ip-settings-summary" style="margin-top:10px;"></div>
+            <div id="ip-guidelines-panel"></div>
+          </div>
           </div>
         </div>
 
         <!-- Step 2: 角色资产 -->
         <div class="ip-step-content hidden" id="ip-step-2">
+          <div class="ip-step-header" data-toggle-step="2"><span class="ip-step-header-num">2</span> 角色资产</div>
+          <div class="ip-step-body">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
             <label style="margin-bottom:0;">角色资产</label>
             <button type="button" class="primary sm" id="btn-gen-all-char-images">生成全部角色图</button>
@@ -130,58 +136,142 @@
           <div id="ip-char-progress" class="hidden" style="margin-top:12px;">
             <div class="log" id="ip-char-log" style="max-height:120px;"></div>
           </div>
+          </div>
         </div>
 
         <!-- Step 3: 生成故事 -->
         <div class="ip-step-content hidden" id="ip-step-3">
+          <div class="ip-step-header" data-toggle-step="3"><span class="ip-step-header-num">3</span> 生成故事</div>
+          <div class="ip-step-body">
           <label>本期主题提示（可选）</label>
           <input type="text" id="ip-theme-hint" placeholder="如：阿肥偷吃被发现" />
           <div class="flex" style="margin-top:12px;">
             <button type="button" class="primary" id="btn-ip-gen-story">生成故事大纲</button>
           </div>
           <div id="ip-story-preview" class="hidden" style="margin-top:16px;"></div>
+          </div>
         </div>
 
         <!-- Step 4: 生成分镜 -->
         <div class="ip-step-content hidden" id="ip-step-4">
+          <div class="ip-step-header" data-toggle-step="4"><span class="ip-step-header-num">4</span> 生成分镜</div>
+          <div class="ip-step-body">
           <div class="row">
             <div>
+              <label>预期时长</label>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <input type="number" id="ip-target-min" value="1" min="0" max="10" style="width:70px;" /><span>分</span>
+                <input type="number" id="ip-target-sec" value="0" min="0" max="59" style="width:70px;" /><span>秒</span>
+              </div>
+            </div>
+            <div>
+              <label>平均分镜时长</label>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <input type="number" id="ip-avg-shot-dur" value="2.5" min="1" max="10" step="0.5" style="width:80px;" /><span>秒</span>
+              </div>
+            </div>
+            <div>
+              <label>推荐分镜数</label>
+              <div id="ip-shot-calc" style="font-weight:600;color:var(--primary);padding:6px 0;"></div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <div>
               <label>最少镜头</label>
-              <input type="number" id="ip-min-shots" value="8" min="3" max="40" />
+              <input type="number" id="ip-min-shots" value="8" min="3" max="40" style="width:80px;" />
             </div>
             <div>
               <label>最多镜头</label>
-              <input type="number" id="ip-max-shots" value="16" min="3" max="60" />
+              <input type="number" id="ip-max-shots" value="16" min="3" max="60" style="width:80px;" />
+            </div>
+            <div>
+              <label>对白模式</label>
+              <select id="ip-dialogue-mode" style="width:140px;">
+                <option value="normal">正常对白</option>
+                <option value="rich">丰富对白</option>
+                <option value="silent">纯画面（无对白）</option>
+              </select>
             </div>
           </div>
           <div class="flex" style="margin-top:12px;">
             <button type="button" class="primary" id="btn-ip-gen-storyboard">生成 IP 分镜</button>
           </div>
           <div id="ip-storyboard-status" class="hidden" style="margin-top:12px;color:var(--muted);font-size:13px;"></div>
+          <div id="ip-storyboard-preview" class="hidden" style="margin-top:16px;"></div>
+          </div>
         </div>
 
         <!-- Step 5: 生成视频 -->
         <div class="ip-step-content hidden" id="ip-step-5">
+          <div class="ip-step-header" data-toggle-step="5"><span class="ip-step-header-num">5</span> 生成视频</div>
+          <div class="ip-step-body">
+          <div id="ip-estimated-duration" class="hidden" style="margin-bottom:12px;padding:8px 14px;background:var(--surface);border-left:3px solid var(--primary);border-radius:4px;font-size:0.9em;"></div>
           <div class="row">
             <div>
               <label>声音模式</label>
               <select id="ip-voice-mode">
-                <option value="native">原生音色（wan2.7 内置）</option>
-                <option value="pipeline">独立配音（TTS + 合并）</option>
+                <option value="native">原生配音（万相内置，需上传参考音频）</option>
+                <option value="pipeline">TTS 配音（使用角色预置/克隆音色）</option>
                 <option value="silent">静音视频</option>
+              </select>
+              <p id="ip-voice-mode-hint" class="field-hint" style="margin:4px 0 0;font-size:0.8em;color:var(--text-secondary);"></p>
+            </div>
+            <div>
+              <label>宽高比 & 分辨率</label>
+              <select id="ip-gen-resolution">
+                <optgroup label="720P">
+                  <option value="720*1280" selected>9:16 竖屏 (720×1280)</option>
+                  <option value="1280*720">16:9 横屏 (1280×720)</option>
+                  <option value="960*960">1:1 方形 (960×960)</option>
+                  <option value="832*1104">3:4 竖屏 (832×1104)</option>
+                  <option value="1104*832">4:3 横屏 (1104×832)</option>
+                </optgroup>
+                <optgroup label="1080P">
+                  <option value="1080*1920">9:16 竖屏 (1080×1920)</option>
+                  <option value="1920*1080">16:9 横屏 (1920×1080)</option>
+                  <option value="1440*1440">1:1 方形 (1440×1440)</option>
+                  <option value="1248*1648">3:4 竖屏 (1248×1648)</option>
+                  <option value="1648*1248">4:3 横屏 (1648×1248)</option>
+                </optgroup>
               </select>
             </div>
             <div>
               <label>并发数</label>
               <input type="number" id="ip-max-workers" value="4" min="1" max="8" />
             </div>
-            <div>
-              <label>分辨率（可选）</label>
-              <input type="text" id="ip-gen-resolution" placeholder="720*1280" />
+          </div>
+          <div id="ip-video-runs" style="margin-top:12px;"></div>
+          <div class="flex" style="margin-top:12px;gap:8px;">
+            <button type="button" class="primary" id="btn-ip-gen-video">开始生成</button>
+          </div>
+
+          <!-- 进度条 -->
+          <div id="ip-gen-progress-wrap" class="progress-bar-wrap hidden" style="margin-top:14px;">
+            <div id="ip-gen-progress-bar" class="progress-bar" style="width:0%"></div>
+          </div>
+
+          <!-- 进度日志 -->
+          <div id="ip-progress-log-wrap" class="hidden" style="margin-top:12px;">
+            <label>进度日志</label>
+            <div class="log" id="ip-progress-log" style="max-height:200px;overflow-y:auto;font-size:0.82em;"></div>
+          </div>
+
+          <!-- 片段预览 -->
+          <div id="ip-segments-section" class="hidden" style="margin-top:16px;">
+            <label>已生成片段（鼠标悬停播放）</label>
+            <div id="ip-segments-grid" class="segments-grid"></div>
+          </div>
+
+          <!-- 成片播放 -->
+          <div id="ip-output-wrap" class="hidden" style="margin-top:16px;">
+            <label>成片</label>
+            <video id="ip-output-video" controls style="width:100%;max-height:500px;border-radius:8px;"></video>
+            <div style="margin-top:8px;display:flex;gap:8px;">
+              <a class="btn primary sm" id="ip-download-link" href="#" download>下载 MP4</a>
             </div>
           </div>
-          <div class="flex" style="margin-top:12px;">
-            <button type="button" class="primary" id="btn-ip-gen-video">生成视频</button>
+
+          <div id="ip-video-status" class="hidden" style="margin-top:12px;color:var(--muted);font-size:13px;"></div>
           </div>
         </div>
       </div>
@@ -519,6 +609,6 @@
     <button type="button" class="ghost" id="btn-close-ip-manage" style="margin-top:16px;">关闭</button>
   </aside>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260414e"></script>
 </body>
 </html>

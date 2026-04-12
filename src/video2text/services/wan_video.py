@@ -232,10 +232,12 @@ def wait_for_video_url(
     task_id: str,
     poll_seconds: float = 15.0,
     max_wait_seconds: float = 900.0,
+    poll_callback: Callable[[str, str], None] | None = None,
 ) -> str:
     url = tasks_get_url(settings, task_id)
     key = settings.dashscope_api_key
     deadline = time.monotonic() + max_wait_seconds
+    poll_count = 0
     while time.monotonic() < deadline:
         rsp = _get_json(url, key)
         out = rsp.get("output") or {}
@@ -249,6 +251,10 @@ def wait_for_video_url(
             raise RuntimeError(
                 f"万相任务失败: {out.get('code')} {out.get('message', rsp)}"
             )
+        poll_count += 1
+        if poll_callback:
+            elapsed = int(time.monotonic() - (deadline - max_wait_seconds))
+            poll_callback(status, f"{elapsed}s")
         time.sleep(poll_seconds)
     raise TimeoutError(f"等待万相任务超时: {task_id}")
 
@@ -294,4 +300,7 @@ def generate_wan27_clip(
         )
     if poll_callback:
         poll_callback(f"submitted task {tid}")
-    return wait_for_video_url(settings, tid)
+    def _wrap_poll(status: str, elapsed: str) -> None:
+        if poll_callback:
+            poll_callback(f"task {tid[:8]}… {status} ({elapsed})")
+    return wait_for_video_url(settings, tid, poll_callback=_wrap_poll)

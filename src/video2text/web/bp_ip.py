@@ -133,7 +133,7 @@ def api_get_ip(ip_id: str):
 @bp.route("/api/ip/create", methods=["POST"])
 def api_create_ip():
     user = _deps["require_user"]()
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     seed = data.get("seed_idea", "").strip()
     if not seed:
         return jsonify({"error": "请输入种子创意"}), 400
@@ -160,7 +160,7 @@ def api_create_ip():
 def api_confirm_ip():
     """确认 IP 提案并保存。角色图生成不再在此处同步执行。"""
     user = _deps["require_user"]()
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     proposal = data.get("proposal")
     if not proposal:
         return jsonify({"error": "缺少 proposal"}), 400
@@ -186,7 +186,7 @@ def api_update_ip(ip_id: str):
     ip = load_ip(user, ip_id)
     if not ip:
         return jsonify({"error": "IP 不存在"}), 404
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     updated = IPProfile.from_dict({**ip.to_dict(), **data, "id": ip_id})
     save_ip(user, updated)
     return jsonify(updated.to_dict())
@@ -212,7 +212,7 @@ def api_generate_character_images(ip_id: str):
     if not ip:
         return jsonify({"error": "IP 不存在"}), 404
 
-    char_ids = (request.json or {}).get("char_ids")
+    char_ids = (request.get_json(silent=True) or {}).get("char_ids")
 
     task_id = uuid.uuid4().hex[:16]
     _deps["ensure_workspace"](user)
@@ -272,6 +272,7 @@ def api_generate_character_images(ip_id: str):
 
 @bp.route("/api/ip/<ip_id>/character/<char_id>/regenerate", methods=["POST"])
 def api_regenerate_character_image(ip_id: str, char_id: str):
+    """异步重新生成单个角色参考图，返回 task_id 供前端轮询进度。"""
     user = _deps["require_user"]()
     ip = load_ip(user, ip_id)
     if not ip:
@@ -279,22 +280,115 @@ def api_regenerate_character_image(ip_id: str, char_id: str):
     char = ip.get_character(char_id)
     if not char:
         return jsonify({"error": "角色不存在"}), 404
-    try:
-        settings = _deps["load_settings_for_user"](user)
-        ip = generate_character_images(ip, user, settings, char_ids=[char_id])
-        return jsonify({"ip": ip.to_dict()})
-    except Exception as e:
-        record_exception("api_ip_char_regen")
-        log.exception(
-            "api_regenerate_character_image failed",
-            extra={
-                "event": "api_ip_char_regen_failed",
-                "request_id": get_request_id(),
-                "user": user,
-                "ip_id": ip_id,
-            },
-        )
-        return jsonify({"error": str(e), "request_id": get_request_id()}), 500
+
+    data = request.get_json(silent=True) or {}
+    auto_fix = data.get("auto_fix", False)
+    error_reason = data.get("error_reason", "版权侵权")
+
+    task_id = uuid.uuid4().hex[:16]
+    _deps["ensure_workspace"](user)
+    task_dir = _deps["get_user_workspace_dir"](user) / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "task_id": task_id,
+        "owner": user,
+        "type": "ip-char-regen",
+        "ip_id": ip_id,
+        "char_id": char_id,
+        "char_name": char.name,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _deps["update_task_meta"](task_dir, meta)
+
+    def _run_char_regen(tid: str, params: dict) -> None:
+        td = _deps["task_dir"](tid)
+        owner = params["_owner"]
+        ip_obj = load_ip(owner, params["ip_id"])
+        if not ip_obj:
+            _deps["update_task_meta"](td, {"status": "failed", "error": "IP 不存在"})
+            return
+        c = ip_obj.get_character(params["char_id"])
+        if not c:
+            _deps["update_task_meta"](td, {"status": "failed", "error": "角色不存在"})
+            return
+        try:
+            _deps["update_task_meta"](td, {"status": "generating"})
+            settings = _deps["load_settings_for_user"](owner)
+
+            if params.get("auto_fix"):
+                _deps["sse_push"](tid, f"检测到内容策略问题，正在用 AI 修正「{c.name}」的描述…")
+                from video2text.core.ip_creator import _auto_fix_character_description
+                fixed = _auto_fix_character_description(
+                    c, ip_obj, settings, params.get("error_reason", "版权侵权"),
+                )
+                if fixed:
+                    c.visual_description = fixed
+                    save_ip(owner, ip_obj)
+                    _deps["sse_push"](tid, f"描述已修正，开始重新生成图片…")
+                else:
+                    _deps["sse_push"](tid, "AI 未能修正描述，尝试直接重新生成…")
+
+            _deps["sse_push"](tid, f"正在为「{c.name}」生成参考图…")
+            ip_obj = generate_character_images(
+                ip_obj, owner, settings,
+                char_ids=[params["char_id"]],
+                progress_cb=lambda m: _deps["sse_push"](tid, m),
+            )
+            updated = ip_obj.get_character(params["char_id"])
+            char_ok = bool(updated and updated.reference_image_path)
+
+            result = {
+                "status": "done",
+                "ip": ip_obj.to_dict(),
+                "char_ok": char_ok,
+                "auto_fixed": params.get("auto_fix", False),
+            }
+            _deps["update_task_meta"](td, result)
+            if char_ok:
+                _deps["sse_push"](tid, f"「{c.name}」参考图生成完成！")
+            else:
+                from video2text.core.ip_creator import _classify_image_error
+                _deps["update_task_meta"](td, {
+                    "status": "done",
+                    "char_ok": False,
+                    "char_error_type": "generation_failed",
+                })
+                _deps["sse_push"](tid, f"「{c.name}」图片生成未成功")
+        except Exception as e:
+            err_str = str(e)
+            from video2text.core.ip_creator import _classify_image_error
+            error_type = _classify_image_error(err_str)
+            _deps["update_task_meta"](td, {
+                "status": "failed",
+                "error": err_str,
+                "error_type": error_type,
+                "can_auto_fix": bool(error_type),
+            })
+            _deps["sse_push"](tid, f"错误：{e}")
+            record_exception("ip_char_regen_job")
+            log.exception(
+                "ip char regen job failed",
+                extra={
+                    "event": "ip_char_regen_failed",
+                    "task_id": tid,
+                    "user": owner,
+                    "ip_id": params.get("ip_id", ""),
+                    "char_id": params.get("char_id", ""),
+                },
+            )
+
+    regen_params = {
+        "_owner": user,
+        "ip_id": ip_id,
+        "char_id": char_id,
+        "auto_fix": auto_fix,
+        "error_reason": error_reason,
+    }
+    if not _deps["spawn"]("ip-char-regen", _run_char_regen, task_id, regen_params):
+        return jsonify({"error": "该角色正在生成中，请稍候"}), 409
+    return jsonify({"task_id": task_id, "status": "pending"})
 
 
 @bp.route("/api/ip/<ip_id>/character/<char_id>/image", methods=["GET"])
@@ -360,7 +454,7 @@ def api_set_character_voice(ip_id: str, char_id: str):
     char = ip.get_character(char_id)
     if not char:
         return jsonify({"error": "角色不存在"}), 404
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     from video2text.core.ip_manager import VoiceProfile
     vp = VoiceProfile.from_dict({**char.voice_profile.to_dict(), **data})
     char.voice_profile = vp
@@ -389,9 +483,22 @@ def api_upload_character_voice(ip_id: str, char_id: str):
     dest.parent.mkdir(parents=True, exist_ok=True)
     f.save(str(dest))
 
+    # 立即上传到 OSS 获取公网 URL（native 模式需要）
+    oss_url = ""
+    try:
+        settings = _deps["load_settings_for_user"](user)
+        from dashscope.utils.oss_utils import check_and_upload_local
+        _, oss_url, _ = check_and_upload_local(
+            settings.video_ref_model, str(dest), settings.dashscope_api_key, None,
+        )
+        log.info("Voice audio uploaded to OSS: char=%s, url=%s", char.name, oss_url[:80])
+    except Exception:
+        log.exception("Failed to upload voice audio to OSS for char %s", char.name)
+
     char.voice_profile = VoiceProfile(
         mode="clone",
         reference_audio_path=str(dest),
+        reference_audio_url=oss_url,
         provider=char.voice_profile.provider or "cosyvoice",
     )
     save_ip(user, ip)
@@ -410,7 +517,7 @@ def api_preview_character_voice(ip_id: str, char_id: str):
         return jsonify({"error": "角色不存在"}), 404
     if not char.voice_profile.is_configured:
         return jsonify({"error": "该角色尚未设置音色"}), 400
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     text = data.get("text", "").strip()
     if not text:
         text = f"你好，我是{char.name}。"
@@ -431,6 +538,16 @@ def api_preview_character_voice(ip_id: str, char_id: str):
             "duration_ms": result.duration_ms,
         })
     except Exception as e:
+        log.exception(
+            "voice preview failed",
+            extra={
+                "event": "voice_preview_failed",
+                "user": user,
+                "ip_id": ip_id,
+                "char_id": char_id,
+                "voice_id": char.voice_profile.effective_voice_id,
+            },
+        )
         return jsonify({"error": str(e)}), 500
 
 
@@ -445,7 +562,7 @@ def api_ip_story(ip_id: str):
     ip = load_ip(user, ip_id)
     if not ip:
         return jsonify({"error": "IP 不存在"}), 404
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     theme_hint = data.get("theme_hint", "")
     min_shots = int(data.get("min_shots", 8))
     max_shots = int(data.get("max_shots", 16))
@@ -457,6 +574,8 @@ def api_ip_story(ip_id: str):
             min_shots=min_shots,
             max_shots=max_shots,
         )
+        ip.last_story_outline = outline
+        save_ip(user, ip)
         return jsonify({"outline": outline})
     except Exception as e:
         record_exception("api_ip_story")
@@ -483,7 +602,7 @@ def api_ip_refine(ip_id: str):
     ip = load_ip(user, ip_id)
     if not ip:
         return jsonify({"error": "IP 不存在"}), 404
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     section = data.get("section", "")
     instruction = data.get("instruction", "").strip()
     current_content = data.get("current_content", "")
@@ -513,6 +632,165 @@ def api_ip_refine(ip_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 大纲保存 + 反馈系统
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/ip/<ip_id>/outline", methods=["PUT"])
+def api_save_outline(ip_id: str):
+    """保存/更新故事大纲到 IP profile。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    data = request.get_json(silent=True) or {}
+    outline = data.get("outline")
+    if outline is None:
+        return jsonify({"error": "缺少 outline"}), 400
+    ip.last_story_outline = dict(outline) if isinstance(outline, dict) else {}
+    save_ip(user, ip)
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/ip/<ip_id>/feedback", methods=["GET"])
+def api_get_feedback(ip_id: str):
+    """查看 IP 的反馈历史。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    return jsonify({
+        "feedback_log": [f.to_dict() for f in ip.feedback_log],
+        "creative_guidelines": ip.creative_guidelines,
+    })
+
+
+@bp.route("/api/ip/<ip_id>/feedback", methods=["POST"])
+def api_add_feedback(ip_id: str):
+    """记录一条反馈并检查是否需要自动提炼 guidelines。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    data = request.get_json(silent=True) or {}
+
+    from video2text.core.ip_manager import FeedbackEntry
+    entry = FeedbackEntry(
+        id=uuid.uuid4().hex[:12],
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        phase=str(data.get("phase", "")),
+        section=str(data.get("section", "")),
+        instruction=str(data.get("instruction", "")),
+        before_snapshot=str(data.get("before_snapshot", ""))[:500],
+        after_snapshot=str(data.get("after_snapshot", ""))[:500],
+        accepted=bool(data.get("accepted", True)),
+    )
+    ip.feedback_log.append(entry)
+
+    auto_distill = len(ip.feedback_log) % 5 == 0 and len(ip.feedback_log) > 0
+    if auto_distill:
+        try:
+            settings = _deps["load_settings_for_user"](user)
+            from video2text.core.ip_creator import distill_creative_guidelines
+            ip.creative_guidelines = distill_creative_guidelines(ip, settings)
+        except Exception:
+            log.exception("auto distill guidelines failed")
+
+    save_ip(user, ip)
+    return jsonify({
+        "ok": True,
+        "feedback_count": len(ip.feedback_log),
+        "auto_distilled": auto_distill,
+        "creative_guidelines": ip.creative_guidelines,
+    })
+
+
+@bp.route("/api/ip/<ip_id>/feedback/distill", methods=["POST"])
+def api_distill_guidelines(ip_id: str):
+    """手动触发提炼创作指南。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    if not ip.feedback_log:
+        return jsonify({"error": "尚无反馈记录"}), 400
+    try:
+        settings = _deps["load_settings_for_user"](user)
+        from video2text.core.ip_creator import distill_creative_guidelines
+        ip.creative_guidelines = distill_creative_guidelines(ip, settings)
+        save_ip(user, ip)
+        return jsonify({"creative_guidelines": ip.creative_guidelines})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/ip/<ip_id>/guidelines", methods=["PUT"])
+def api_update_guidelines(ip_id: str):
+    """手动编辑创作指南。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    data = request.get_json(silent=True) or {}
+    guidelines = data.get("guidelines")
+    if not isinstance(guidelines, list):
+        return jsonify({"error": "guidelines 必须是列表"}), 400
+    ip.creative_guidelines = [str(g) for g in guidelines]
+    save_ip(user, ip)
+    return jsonify({"creative_guidelines": ip.creative_guidelines})
+
+
+# ---------------------------------------------------------------------------
+# 分镜更新（翻译持久化、单镜头润色回写）
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/task/<task_id>/storyboard", methods=["PUT"])
+def api_update_storyboard(task_id: str):
+    """更新 storyboard.json 中的 shot 数据（翻译字段、润色后的字段等）。"""
+    user = _deps["require_user"]()
+    td = _deps["task_dir"](task_id)
+    sb_path = td / "storyboard.json"
+    if not sb_path.is_file():
+        return jsonify({"error": "storyboard not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    shots_update = data.get("shots")
+    if not shots_update or not isinstance(shots_update, list):
+        return jsonify({"error": "需要 shots 数组"}), 400
+
+    sb = json.loads(sb_path.read_text(encoding="utf-8"))
+    existing = sb.get("shots", [])
+
+    for upd in shots_update:
+        idx = upd.get("_index")
+        if idx is None or not isinstance(idx, int) or idx < 0 or idx >= len(existing):
+            continue
+        for key, val in upd.items():
+            if key == "_index":
+                continue
+            existing[idx][key] = val
+
+    sb["shots"] = existing
+    sb_path.write_text(json.dumps(sb, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True, "shot_count": len(existing)})
+
+
+@bp.route("/api/ip/<ip_id>/video-tasks", methods=["PUT"])
+def api_ip_video_tasks(ip_id: str):
+    """保存视频生成任务 ID 列表到 IP profile。"""
+    user = _deps["require_user"]()
+    ip = load_ip(user, ip_id)
+    if not ip:
+        return jsonify({"error": "IP 不存在"}), 404
+    data = request.get_json(silent=True) or {}
+    task_ids = data.get("task_ids")
+    if not isinstance(task_ids, list):
+        return jsonify({"error": "需要 task_ids 数组"}), 400
+    ip.last_video_task_ids = [str(t) for t in task_ids][-20:]
+    save_ip(user, ip)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # IP 主题生成任务（分镜 + 可选视频）
 # ---------------------------------------------------------------------------
 
@@ -520,7 +798,7 @@ def api_ip_refine(ip_id: str):
 def api_task_ip_theme():
     """基于 IP 的主题生成任务（生成分镜 + 视频）。"""
     user = _deps["require_user"]()
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     ip_id = data.get("ip_id", "").strip()
     if not ip_id:
         return jsonify({"error": "请指定 IP"}), 400
@@ -534,11 +812,24 @@ def api_task_ip_theme():
     generate_video = data.get("generate_video", True)
     story_outline = data.get("story_outline")
     voice_mode = data.get("voice_mode", "")
+    resolution = data.get("resolution", "")
+    avg_shot_duration = float(data.get("avg_shot_duration", 2.5))
+    target_duration = float(data.get("target_duration", 0))
+    dialogue_mode = data.get("dialogue_mode", "normal")
+    resume_task_id = data.get("resume_task_id", "").strip()
 
-    task_id = uuid.uuid4().hex[:16]
     _deps["ensure_workspace"](user)
-    task_dir = _deps["get_user_workspace_dir"](user) / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
+
+    if resume_task_id:
+        task_id = resume_task_id
+        task_dir = _deps["get_user_workspace_dir"](user) / task_id
+        if not task_dir.is_dir():
+            return jsonify({"error": "续跑任务不存在"}), 404
+        generate_video = True
+    else:
+        task_id = uuid.uuid4().hex[:16]
+        task_dir = _deps["get_user_workspace_dir"](user) / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {
         "task_id": task_id,
@@ -548,6 +839,8 @@ def api_task_ip_theme():
         "ip_name": ip.name,
         "theme_hint": theme_hint,
         "status": "pending",
+        "error": "",
+        "progress": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     _deps["update_task_meta"](task_dir, meta)
@@ -560,21 +853,30 @@ def api_task_ip_theme():
             _deps["update_task_meta"](td, {"status": "failed", "error": "IP 不存在"})
             return
         try:
-            _deps["update_task_meta"](td, {"status": "generating_storyboard"})
-            _deps["sse_push"](tid, "正在生成 IP 分镜…")
-
             settings = _deps["load_settings_for_user"](owner)
-            doc = generate_storyboard_from_ip(
-                ip_obj, settings,
-                theme_hint=params.get("theme_hint", ""),
-                min_shots=int(params.get("min_shots", 8)),
-                max_shots=int(params.get("max_shots", 16)),
-                story_outline=params.get("story_outline"),
-            )
-            doc.save_json(td / "storyboard.json")
-            doc.save_markdown(td / "storyboard.md")
-            _deps["update_task_meta"](td, {"status": "storyboard_ready"})
-            _deps["sse_push"](tid, f"分镜已生成：{len(doc.shots)} 个镜头")
+            is_resume = params.get("_resume", False)
+
+            if is_resume and (td / "storyboard.json").is_file():
+                _deps["sse_push"](tid, "续跑模式：加载已有分镜…")
+                from video2text.core.storyboard import StoryboardDocument
+                doc = StoryboardDocument.load_json(td / "storyboard.json")
+            else:
+                _deps["update_task_meta"](td, {"status": "generating_storyboard"})
+                _deps["sse_push"](tid, "正在生成 IP 分镜…")
+                doc = generate_storyboard_from_ip(
+                    ip_obj, settings,
+                    theme_hint=params.get("theme_hint", ""),
+                    min_shots=int(params.get("min_shots", 8)),
+                    max_shots=int(params.get("max_shots", 16)),
+                    story_outline=params.get("story_outline"),
+                    avg_shot_duration=float(params.get("avg_shot_duration", 2.5)),
+                    target_duration=float(params.get("target_duration", 0)),
+                    dialogue_mode=params.get("dialogue_mode", "normal"),
+                )
+                doc.save_json(td / "storyboard.json")
+                doc.save_markdown(td / "storyboard.md")
+                _deps["update_task_meta"](td, {"status": "storyboard_ready"})
+                _deps["sse_push"](tid, f"分镜已生成：{len(doc.shots)} 个镜头")
 
             if params.get("generate_video", True):
                 _deps["update_task_meta"](td, {"status": "generating_video"})
@@ -585,10 +887,12 @@ def api_task_ip_theme():
                     doc, ip_obj, settings,
                     segments_dir=td / "segments",
                     output_mp4=td / "output.mp4",
+                    size=params.get("resolution") or None,
                     progress_cb=lambda m: _deps["sse_push"](tid, m),
                     meta_update=lambda d: _deps["update_task_meta"](td, d),
                     cancel_event=_deps["cancel_flags"].get(tid),
                     voice_mode=params.get("voice_mode") or None,
+                    max_workers=settings.video_max_workers,
                 )
                 _deps["update_task_meta"](td, {"status": "done"})
                 _deps["sse_push"](tid, "IP 视频生成完成！")
@@ -621,6 +925,11 @@ def api_task_ip_theme():
         "generate_video": generate_video,
         "story_outline": story_outline,
         "voice_mode": voice_mode,
+        "resolution": resolution,
+        "avg_shot_duration": avg_shot_duration,
+        "target_duration": target_duration,
+        "dialogue_mode": dialogue_mode,
+        "_resume": bool(resume_task_id),
     }
     if not _deps["spawn"]("ip-theme", _run_ip_theme_job, task_id, ip_params):
         return (

@@ -64,6 +64,19 @@ def bind_log_context(
             ctx_var.reset(token)
 
 
+class _WerkzeugRequestFilter(logging.Filter):
+    """过滤 werkzeug 的逐条 HTTP 请求日志（如 '127.0.0.1 - - [..] "GET / HTTP/1.1" 200 -'），
+    保留启动信息（如 'Running on ...'、'Press CTRL+C to quit'）。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "HTTP/1." in msg and '" ' in msg:
+            return False
+        if "code 400" in msg and "Bad request" in msg:
+            return False
+        return True
+
+
 class _ContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if not getattr(record, "request_id", None):
@@ -144,6 +157,53 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class _HumanFormatter(logging.Formatter):
+    """终端友好的单行日志格式。"""
+
+    _LEVEL_COLORS = {
+        "DEBUG": "\033[2m",       # dim
+        "INFO": "\033[32m",       # green
+        "WARNING": "\033[33m",    # yellow
+        "ERROR": "\033[31m",      # red
+        "CRITICAL": "\033[1;31m", # bold red
+    }
+    _RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.now().strftime("%H:%M:%S")
+        color = self._LEVEL_COLORS.get(record.levelname, "")
+        reset = self._RESET if color else ""
+        lvl = record.levelname[0]
+
+        msg = record.getMessage()
+
+        # Access log: compact one-liner
+        if record.name == "video2text.access":
+            method = getattr(record, "method", "")
+            path = getattr(record, "path", "")
+            status = getattr(record, "status_code", "")
+            dur = getattr(record, "duration_ms", "")
+            ip = getattr(record, "client_ip", "")
+            user = getattr(record, "user", "") or ""
+            user_tag = f" [{user}]" if user else ""
+            return f"{ts} {ip}{user_tag} {color}{method} {path} → {status}{reset} {dur}ms"
+
+        # Task/event logs
+        event = getattr(record, "event", "") or ""
+        task_id = getattr(record, "task_id", "") or ""
+        extra_parts: list[str] = []
+        if task_id:
+            extra_parts.append(f"task={task_id[:8]}")
+        if event and event not in ("http_request", "logging_init"):
+            extra_parts.append(f"[{event}]")
+        extra = f" ({', '.join(extra_parts)})" if extra_parts else ""
+
+        line = f"{ts} {color}{lvl}{reset} {msg}{extra}"
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
+
+
 def configure_logging() -> None:
     global _INITIALIZED
     with _INIT_LOCK:
@@ -153,6 +213,9 @@ def configure_logging() -> None:
         environment = os.getenv("V2T_ENV", "prod").strip() or "prod"
         level_name = os.getenv("V2T_LOG_LEVEL", "INFO").strip().upper() or "INFO"
         level = getattr(logging, level_name, logging.INFO)
+        log_format = os.getenv("V2T_LOG_FORMAT", "").strip().lower()
+
+        use_json = log_format == "json"
 
         root = logging.getLogger()
         root.setLevel(level)
@@ -160,9 +223,16 @@ def configure_logging() -> None:
 
         handler = logging.StreamHandler(stream=sys.stdout)
         handler.setLevel(level)
-        handler.setFormatter(_JsonFormatter(service_name=service_name, environment=environment))
+        if use_json:
+            handler.setFormatter(_JsonFormatter(service_name=service_name, environment=environment))
+        else:
+            handler.setFormatter(_HumanFormatter())
         handler.addFilter(_ContextFilter())
         root.addHandler(handler)
+
+        # 抑制 werkzeug 的逐条请求日志（我们有自己的 access log），但保留启动信息
+        wz = logging.getLogger("werkzeug")
+        wz.addFilter(_WerkzeugRequestFilter())
 
         logging.captureWarnings(True)
         _INITIALIZED = True

@@ -161,6 +161,37 @@ class IPCharacter:
 
 
 @dataclass
+class FeedbackEntry:
+    """用户对 IP 创作的修改反馈记录。"""
+    id: str = ""
+    timestamp: str = ""
+    phase: str = ""          # "proposal" | "story" | "storyboard" | "video"
+    section: str = ""        # "visual_dna" | "story_outline" | "shot_3" 等
+    instruction: str = ""    # 用户的修改意见原文
+    before_snapshot: str = ""
+    after_snapshot: str = ""
+    accepted: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FeedbackEntry:
+        if not d:
+            return cls()
+        return cls(
+            id=str(d.get("id", "")),
+            timestamp=str(d.get("timestamp", "")),
+            phase=str(d.get("phase", "")),
+            section=str(d.get("section", "")),
+            instruction=str(d.get("instruction", "")),
+            before_snapshot=str(d.get("before_snapshot", "")),
+            after_snapshot=str(d.get("after_snapshot", "")),
+            accepted=bool(d.get("accepted", True)),
+        )
+
+
+@dataclass
 class IPProfile:
     id: str = ""
     name: str = ""
@@ -171,6 +202,10 @@ class IPProfile:
     world_dna: WorldDNA = field(default_factory=WorldDNA)
     characters: list[IPCharacter] = field(default_factory=list)
     narrator_voice: VoiceProfile = field(default_factory=VoiceProfile)
+    last_story_outline: dict[str, Any] = field(default_factory=dict)
+    last_video_task_ids: list[str] = field(default_factory=list)
+    feedback_log: list[FeedbackEntry] = field(default_factory=list)
+    creative_guidelines: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 
@@ -185,6 +220,10 @@ class IPProfile:
             "world_dna": self.world_dna.to_dict(),
             "characters": [c.to_dict() for c in self.characters],
             "narrator_voice": self.narrator_voice.to_dict(),
+            "last_story_outline": self.last_story_outline,
+            "last_video_task_ids": self.last_video_task_ids,
+            "feedback_log": [f.to_dict() for f in self.feedback_log],
+            "creative_guidelines": self.creative_guidelines,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -203,6 +242,12 @@ class IPProfile:
                 IPCharacter.from_dict(c) for c in (d.get("characters") or [])
             ],
             narrator_voice=VoiceProfile.from_dict(d.get("narrator_voice") or {}),
+            last_story_outline=dict(d.get("last_story_outline") or {}),
+            last_video_task_ids=list(d.get("last_video_task_ids") or []),
+            feedback_log=[
+                FeedbackEntry.from_dict(f) for f in (d.get("feedback_log") or [])
+            ],
+            creative_guidelines=list(d.get("creative_guidelines") or []),
             created_at=str(d.get("created_at", "")),
             updated_at=str(d.get("updated_at", "")),
         )

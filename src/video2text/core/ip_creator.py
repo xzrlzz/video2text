@@ -99,6 +99,14 @@ CHARACTER DESIGN RULES:
 4. Supporting characters should complement or contrast with the protagonist.
 5. Limit to 2-4 characters total for consistency.
 
+COPYRIGHT / SAFETY / POLICY RULES (CRITICAL — violations will cause image generation to FAIL):
+1. Character names MUST be 100% original. NEVER use names from existing franchises, movies, games, anime, or literature (e.g. do NOT use names like Gollum/咕噜, Pikachu/皮卡丘, Elsa/艾莎, Naruto/鸣人, etc.).
+2. visual_description MUST describe an ORIGINAL character. Do NOT copy the appearance of any existing copyrighted character. If the seed idea references a known character, create an ORIGINAL character inspired by the concept but visually distinct.
+3. Avoid any real-world political figures, celebrities, or public figures in character design.
+4. No violent, gory, sexually explicit, or otherwise NSFW content in any description.
+5. Avoid content related to drugs, terrorism, hate speech, discrimination, or illegal activities.
+6. If the user's seed idea contains potentially problematic elements, REINTERPRET them creatively into safe, original alternatives while preserving the fun/spirit of the idea.
+
 STORY DNA RULES:
 1. narrative_pattern should be a reusable FORMULA, not a single plot.
 2. typical_plot_hooks should be 5-8 diverse ideas that all fit the formula.
@@ -116,12 +124,21 @@ Choose the most appropriate style_preset_id from the list above. You may also ad
 # ---------------------------------------------------------------------------
 
 
+def _guidelines_block(profile: IPProfile | None) -> str:
+    """将 IP creative_guidelines 格式化为可注入 prompt 的文本块。"""
+    if not profile or not profile.creative_guidelines:
+        return ""
+    lines = "\n".join(f"{i}. {g}" for i, g in enumerate(profile.creative_guidelines, 1))
+    return f"\n\nCREATIVE GUIDELINES (learned from past iterations):\n{lines}\n"
+
+
 def generate_ip_proposal(
     seed_idea: str,
     settings: Settings,
     *,
     style_preset_id: str = "",
     model: str | None = None,
+    ip_profile: IPProfile | None = None,
 ) -> dict[str, Any]:
     """从种子创意生成完整 IP 提案 JSON。
 
@@ -147,6 +164,9 @@ def generate_ip_proposal(
     if style_preset_id:
         kw = get_style_keywords(style_preset_id, "zh")
         user_parts.append(f"用户已选择风格预设：{style_preset_id}（{kw}），请基于此风格展开。")
+    gl = _guidelines_block(ip_profile)
+    if gl:
+        user_parts.append(gl)
     user_parts.append("请输出完整的 IP 提案 JSON。")
 
     log.info("Generating IP proposal from seed: %s", seed_idea[:100])
@@ -263,20 +283,114 @@ def generate_character_images(
         dest = get_character_reference_path(username, profile.id, char.id)
 
         try:
-            img_path = generate_image(
-                prompt,
-                settings,
-                save_to=dest,
-            )
+            img_path = generate_image(prompt, settings, save_to=dest)
             char.reference_image_path = str(img_path)
             char.reference_type = "generated"
             cb(f"角色 {char.name} 参考图已生成")
         except Exception as exc:
+            err_str = str(exc)
             log.error("Failed to generate image for %s: %s", char.name, exc)
-            cb(f"角色 {char.name} 图片生成失败: {exc}")
+
+            retry_reason = _classify_image_error(err_str)
+            if retry_reason:
+                cb(f"角色 {char.name} 生成失败（{retry_reason}），正在自动修正描述并重试…")
+                try:
+                    fixed = _auto_fix_character_description(
+                        char, profile, settings, retry_reason,
+                    )
+                    if fixed:
+                        char.visual_description = fixed
+                        prompt2 = build_character_image_prompt(char, profile.visual_dna)
+                        log.info("Retrying with fixed prompt: %s", prompt2[:200])
+                        img_path = generate_image(prompt2, settings, save_to=dest)
+                        char.reference_image_path = str(img_path)
+                        char.reference_type = "generated"
+                        cb(f"角色 {char.name} 参考图已生成（自动修正后）")
+                        continue
+                except Exception as exc2:
+                    log.error("Retry also failed for %s: %s", char.name, exc2)
+                    cb(f"角色 {char.name} 自动修正重试仍失败: {exc2}")
+            else:
+                cb(f"角色 {char.name} 图片生成失败: {exc}")
 
     save_ip(username, profile)
     return profile
+
+
+# ---------------------------------------------------------------------------
+# 图片生成错误分类 + 自动修正
+# ---------------------------------------------------------------------------
+
+_ERROR_PATTERNS: list[tuple[str, str]] = [
+    ("IPInfringement", "版权侵权"),
+    ("DataInspection", "内容安全审核"),
+    ("ContentFilter", "内容过滤"),
+    ("SecurityAudit", "安全审核"),
+    ("PolicyViolation", "政策违规"),
+    ("SensitiveContent", "敏感内容"),
+]
+
+
+def _classify_image_error(err_str: str) -> str:
+    """判断图片生成错误是否可通过修改 prompt 自动修复，返回失败原因描述。"""
+    for pattern, reason in _ERROR_PATTERNS:
+        if pattern.lower() in err_str.lower():
+            return reason
+    return ""
+
+
+def _auto_fix_character_description(
+    char: IPCharacter,
+    profile: IPProfile,
+    settings: Settings,
+    error_reason: str,
+) -> str:
+    """用 LLM 自动修改角色描述以规避版权/安全/政策问题。"""
+    from video2text.config.settings import resolve_light_model
+    client = OpenAI(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.base_url,
+    )
+    model = resolve_light_model(settings)
+
+    system = (
+        "You are a character design safety expert. A character's visual description was REJECTED "
+        "by the image generation API due to content policy issues. Your task is to REWRITE the "
+        "visual description to avoid the issue while keeping the character recognizable and interesting.\n\n"
+        "RULES:\n"
+        "1. REMOVE any references to existing copyrighted characters, real celebrities, or trademarked names.\n"
+        "2. If the character name itself is problematic, suggest changing it (but keep similar vibe).\n"
+        "3. Keep the same art style, personality vibe, and role.\n"
+        "4. Make the character MORE ORIGINAL — unique features, original outfit designs.\n"
+        "5. Avoid any politically sensitive, violent, or sexually suggestive content.\n"
+        "6. Output ONLY the new visual_description text (no JSON, no explanation).\n"
+        "7. Keep the same language as the original description."
+    )
+    user = (
+        f"角色名: {char.name} ({char.name_en})\n"
+        f"角色定位: {char.role}\n"
+        f"IP 名称: {profile.name}\n"
+        f"IP 风格: {profile.visual_dna.style_keywords}\n\n"
+        f"原始视觉描述:\n{char.visual_description}\n\n"
+        f"被拒原因: {error_reason}\n\n"
+        f"请重写视觉描述，确保原创且不触发任何版权/安全/政策问题。"
+    )
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=2048,
+    )
+    result = (completion.choices[0].message.content or "").strip()
+    if result:
+        log.info(
+            "Auto-fixed character description for %s: %s → %s",
+            char.name, char.visual_description[:80], result[:80],
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +410,28 @@ RULES:
 - Only change what the user asks for; preserve everything else
 - If modifying a character, keep visual_description detailed enough for text-to-image
 - All English content stays English; Chinese content stays Chinese (matching original)
+"""
+
+_REFINE_SHOT_SYSTEM = """You are an expert storyboard director. You are refining a SINGLE SHOT within a larger storyboard sequence.
+
+The user provides:
+1. The full IP context (characters, visual style, world)
+2. The TARGET SHOT to modify
+3. The PREVIOUS and NEXT shots for continuity context
+4. The story synopsis for narrative context
+5. Their modification INSTRUCTION
+
+CRITICAL RULES:
+- Output ONLY the modified target_shot as strict JSON (no Markdown, no preamble)
+- MAINTAIN NARRATIVE CONTINUITY with previous and next shots:
+  * Character emotional arcs should progress logically
+  * continuity_anchor should reflect the actual relationship to the previous shot
+- VISUAL CONTINUITY — distinguish two cases:
+  * SAME SCENE (same location/time): maintain spatial consistency, coherent lighting, natural camera flow, characters stay in believable positions
+  * SCENE CHANGE (different location/time, flashback, cutaway): this is a legitimate storytelling device. Use appropriate cut_rhythm (SMASH_CUT, JUMP_CUT, etc.), update continuity_anchor to describe the transition rather than spatial linkage (e.g. "Scene change: from kitchen to park"), and establish the new environment clearly in scene_description and generation_prompt
+- Keep generation_prompt following the IP mode formula: [framing + camera] + [spatial anchor] + [CHARACTER + visual traits] + [action] + [lighting] + [style keywords]
+- Keep all text in English
+- Only change what the user asks for; preserve everything else
 """
 
 
@@ -332,19 +468,44 @@ def refine_ip_section(
     else:
         content_str = str(current_content)
 
-    user_msg = (
-        f"=== IP CONTEXT ===\n{ip_context}\n=== END CONTEXT ===\n\n"
-        f"SECTION: {section}\n\n"
-        f"CURRENT CONTENT:\n{content_str}\n\n"
-        f"INSTRUCTION: {instruction}\n\n"
-        f"Output the modified section as strict JSON only."
-    )
+    gl = _guidelines_block(profile)
+
+    if section == "storyboard_shot" and isinstance(current_content, dict) and "target_shot" in current_content:
+        sys_prompt = _REFINE_SHOT_SYSTEM
+        target = json.dumps(current_content["target_shot"], ensure_ascii=False, indent=2)
+        prev_s = current_content.get("prev_shot")
+        next_s = current_content.get("next_shot")
+        synopsis = current_content.get("story_outline_synopsis", "")
+        position = current_content.get("shot_position", "")
+
+        context_parts = [f"=== IP CONTEXT ===\n{ip_context}\n=== END CONTEXT ===\n"]
+        if synopsis:
+            context_parts.append(f"STORY SYNOPSIS: {synopsis}\n")
+        context_parts.append(f"SHOT POSITION: {position}\n")
+        if prev_s:
+            context_parts.append(f"PREVIOUS SHOT:\n{json.dumps(prev_s, ensure_ascii=False, indent=2)}\n")
+        context_parts.append(f"TARGET SHOT (to modify):\n{target}\n")
+        if next_s:
+            context_parts.append(f"NEXT SHOT:\n{json.dumps(next_s, ensure_ascii=False, indent=2)}\n")
+        context_parts.append(f"INSTRUCTION: {instruction}\n{gl}")
+        context_parts.append("Output ONLY the modified target_shot as strict JSON.")
+        user_msg = "\n".join(context_parts)
+    else:
+        sys_prompt = _REFINE_SYSTEM
+        user_msg = (
+            f"=== IP CONTEXT ===\n{ip_context}\n=== END CONTEXT ===\n\n"
+            f"SECTION: {section}\n\n"
+            f"CURRENT CONTENT:\n{content_str}\n\n"
+            f"INSTRUCTION: {instruction}\n"
+            f"{gl}\n"
+            f"Output the modified section as strict JSON only."
+        )
 
     log.info("Refining IP section=%s, instruction=%s", section, instruction[:100])
     completion = client.chat.completions.create(
         model=use_model,
         messages=[
-            {"role": "system", "content": _REFINE_SYSTEM},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_msg},
         ],
         max_tokens=4096,
@@ -354,3 +515,73 @@ def refine_ip_section(
         return _extract_json_object(raw)
     except Exception:
         return raw.strip()
+
+
+# ---------------------------------------------------------------------------
+# 反馈提炼 → 创作指南
+# ---------------------------------------------------------------------------
+
+_DISTILL_SYSTEM = """You are a creative analytics expert. Analyze the user's feedback history for an IP creative project and distill actionable creative guidelines.
+
+Input: a list of feedback entries (each with: phase, section, instruction, before/after snapshots) and the current guidelines (if any).
+
+Output: a JSON array of 5-10 concise, actionable creative guideline strings. Each guideline should:
+1. Be specific and actionable (not vague like "be creative")
+2. Reflect patterns from the feedback (recurring preferences, common corrections)
+3. Cover different aspects: visual style, narrative, character, pacing, tone
+4. Be written in the SAME LANGUAGE as the majority of instructions (likely Chinese)
+
+Output ONLY a JSON array of strings, e.g.: ["guideline1", "guideline2", ...]
+"""
+
+
+def distill_creative_guidelines(
+    profile: IPProfile,
+    settings: Settings,
+    *,
+    model: str | None = None,
+) -> list[str]:
+    """从反馈历史中提炼创作指导原则。"""
+    if not profile.feedback_log:
+        return profile.creative_guidelines
+
+    from video2text.config.settings import resolve_light_model
+    client = OpenAI(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.base_url,
+    )
+    use_model = model or resolve_light_model(settings)
+
+    entries = []
+    for f in profile.feedback_log[-20:]:
+        entries.append({
+            "phase": f.phase,
+            "section": f.section,
+            "instruction": f.instruction,
+            "accepted": f.accepted,
+        })
+
+    user_msg = (
+        f"IP: {profile.name}\n\n"
+        f"Current guidelines:\n{json.dumps(profile.creative_guidelines, ensure_ascii=False)}\n\n"
+        f"Recent feedback ({len(entries)} entries):\n"
+        f"{json.dumps(entries, ensure_ascii=False, indent=2)}\n\n"
+        "Distill into 5-10 actionable creative guidelines."
+    )
+
+    completion = client.chat.completions.create(
+        model=use_model,
+        messages=[
+            {"role": "system", "content": _DISTILL_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=2048,
+    )
+    raw = (completion.choices[0].message.content or "").strip()
+    try:
+        result = json.loads(raw) if raw.startswith("[") else _extract_json_object(raw)
+        if isinstance(result, list):
+            return [str(g) for g in result]
+    except Exception:
+        log.warning("Failed to parse distilled guidelines: %s", raw[:200])
+    return profile.creative_guidelines

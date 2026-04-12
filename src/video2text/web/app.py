@@ -227,8 +227,8 @@ def _sse_push(task_id: str, event: dict[str, Any] | str) -> None:
             meta = _read_task_meta(task_id)
             prog = list(meta.get("progress", []))
             prog.append({"t": _iso_now(), "msg": msg})
-            meta["progress"] = prog[-500:]
-            _write_task_meta(task_id, meta)
+            updates = {"progress": prog[-500:]}
+            _write_task_meta(task_id, updates)
     if isinstance(event, dict) and event.get("type") == "status":
         log.info(
             "task status event",
@@ -1062,10 +1062,11 @@ def api_task_theme_generate_idea():
     style_hint = (body.get("style") or "").strip()
     try:
         settings = _load_settings_for_user(username)
+        from video2text.config.settings import resolve_light_model
         try:
             use_model = resolve_theme_idea_model(settings)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
+        except ValueError:
+            use_model = resolve_light_model(settings)
         client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
         style_clause = f" Style preference: {style_hint}" if style_hint else ""
         sys_prompt = (
@@ -1515,23 +1516,20 @@ def api_translate():
         return jsonify({"result": ""})
     try:
         settings = _load_settings_for_user(username)
-        try:
-            use_model = resolve_theme_story_model(settings)
-        except ValueError as e:
-            return jsonify({"error": str(e), "result": ""}), 400
         client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
-        if target == "zh":
-            sys_prompt = "You are a professional translator. Translate the given English text to natural Simplified Chinese. Output the translation only, no explanation."
-            user_prompt = f"Translate to Chinese:\n{text}"
-        else:
-            sys_prompt = "You are a professional translator. Translate the given Chinese text to natural English. Output the translation only, no explanation."
-            user_prompt = f"Translate to English:\n{text}"
+
+        source_lang = "English" if target == "zh" else "Chinese"
+        target_lang = "Chinese" if target == "zh" else "English"
+
         completion = client.chat.completions.create(
-            model=use_model,
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            model="qwen-mt-flash",
+            messages=[{"role": "user", "content": text}],
+            extra_body={
+                "translation_options": {
+                    "source_lang": source_lang,
+                    "target_lang": target_lang,
+                },
+            },
         )
         result = (completion.choices[0].message.content or "").strip()
         return jsonify({"result": result})
@@ -1576,8 +1574,9 @@ Rules:
 
 def _generate_subjects_from_storyboard(doc: StoryboardDocument, settings: Any) -> list[dict[str, Any]]:
     """从分镜文档中提取角色列表，调用 LLM 生成详细主体描述。"""
+    from video2text.config.settings import resolve_light_model
     client = OpenAI(api_key=settings.dashscope_api_key, base_url=settings.base_url)
-    use_model = resolve_theme_story_model(settings)
+    use_model = resolve_light_model(settings)
 
     # 构建角色上下文
     dialogue_samples = []

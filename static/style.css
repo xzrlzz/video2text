@@ -671,7 +671,7 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
 
 /* ── IP Steps Bar ── */
 .ip-steps-bar {
-  display: flex;
+  display: none; /* 步骤导航已集成到内容块 header 中 */
   align-items: center;
   gap: 0;
   margin-bottom: 20px;
@@ -731,6 +731,42 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
   .ip-step-label { display: none; }
 }
 
+/* ── IP Step Content Blocks ── */
+.ip-step-content {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 12px;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.ip-step-content:not(.hidden):not(.ip-step-collapsed) {
+  border-color: var(--primary);
+}
+.ip-step-header {
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ip-step-header-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.ip-step-body {
+  padding: 16px;
+}
+
 /* ── IP Character Cards ── */
 #ip-char-cards {
   display: grid;
@@ -747,7 +783,8 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
 .ip-char-card:hover { border-color: var(--primary); }
 .ip-char-card-img {
   width: 100%;
-  height: 160px;
+  max-height: 320px;
+  min-height: 120px;
   background: var(--bg);
   display: flex;
   align-items: center;
@@ -757,8 +794,10 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
 }
 .ip-char-card-img img {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
+  max-height: 320px;
+  object-fit: contain;
+  cursor: pointer;
 }
 .ip-char-card-img .char-img-placeholder {
   display: flex;
@@ -959,6 +998,75 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
 }
 .refine-popup .flex { justify-content: flex-end; }
 
+/* ── Voice Drawer (right sidebar) ── */
+.voice-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0,0,0,0.4);
+  animation: fadeIn 0.15s ease;
+}
+.voice-drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: min(420px, 85vw);
+  z-index: 901;
+  background: var(--surface2);
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 24px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  animation: slideInRight 0.2s ease;
+  overflow: hidden;
+}
+@keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.voice-drawer-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.voice-drawer-header h3 { margin: 0; font-size: 16px; }
+.voice-drawer-header .close-btn {
+  background: none; border: none; cursor: pointer;
+  font-size: 20px; color: var(--muted); padding: 4px 8px;
+}
+.voice-drawer-header .close-btn:hover { color: var(--fg); }
+.voice-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+.voice-drawer-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* ── Image Lightbox ── */
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+  animation: fadeIn 0.15s ease;
+}
+.img-lightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
 /* ── Translate Preview ── */
 .translate-result {
   margin-top: 6px;
@@ -1089,3 +1197,61 @@ video { width: 100%; max-height: 420px; border-radius: var(--radius); background
   font-size: 10px; color: var(--danger, #e53e3e); opacity: 0.8;
   padding: 2px 0; margin: 2px 0;
 }
+
+/* ── Character error bar ── */
+.char-error-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 8px 12px; margin-top: 8px; border-radius: 8px;
+  background: rgba(229, 62, 62, 0.08); border: 1px solid rgba(229, 62, 62, 0.25);
+  animation: fadeSlideIn 0.3s ease;
+}
+.char-error-info { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.char-error-icon { font-size: 16px; flex-shrink: 0; }
+.char-error-text { font-size: 12px; color: var(--danger, #e53e3e); line-height: 1.4; }
+.char-error-text strong { font-weight: 600; }
+.btn-auto-fix {
+  flex-shrink: 0; padding: 5px 14px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--primary); border-radius: 6px;
+  background: var(--primary); color: #fff; cursor: pointer;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+.btn-auto-fix:hover { opacity: 0.85; }
+.btn-auto-fix:disabled { opacity: 0.5; cursor: wait; }
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Character regen progress log ── */
+.char-progress-log {
+  margin-top: 8px; padding: 8px 10px; border-radius: 6px;
+  background: var(--surface2); font-size: 11px; color: var(--muted);
+  max-height: 80px; overflow-y: auto; line-height: 1.6;
+  animation: fadeSlideIn 0.3s ease;
+}
+.char-progress-log div { padding: 1px 0; }
+.char-progress-log div:last-child { color: var(--text); font-weight: 500; }
+
+/* ── IP Storyboard Preview ── */
+.ip-shot-card {
+  transition: border-color 0.15s;
+}
+.ip-shot-card:hover {
+  border-color: var(--primary) !important;
+}
+.ip-shot-card b {
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-size: 0.9em;
+}
+.ip-shot-refine-btn {
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+.ip-shot-card:hover .ip-shot-refine-btn {
+  opacity: 1;
+}
+
+/* ── Field hint ── */
+.field-hint { line-height: 1.4; }

@@ -91,6 +91,8 @@ class Settings:
     video_watermark: bool = True
     video_prompt_extend: bool = True
     enforce_english_audio_text: bool = True
+    llm_light_model: str = "qwen3.5-flash"
+    video_max_workers: int = 4
     voice_mode: str = "native"          # "native" | "pipeline" | "silent"
     tts_model: str = "cosyvoice-v3-flash"
     tts_provider: str = "cosyvoice"     # "cosyvoice" | "fish_speech"
@@ -185,6 +187,8 @@ SETTINGS_ENV_MAP: dict[str, str] = {
     "video_watermark": "V2T_VIDEO_WATERMARK",
     "video_prompt_extend": "V2T_VIDEO_PROMPT_EXTEND",
     "enforce_english_audio_text": "V2T_ENFORCE_ENGLISH_AUDIO_TEXT",
+    "llm_light_model": "V2T_LLM_LIGHT_MODEL",
+    "video_max_workers": "V2T_VIDEO_MAX_WORKERS",
     "voice_mode": "V2T_VOICE_MODE",
     "tts_model": "V2T_TTS_MODEL",
     "tts_provider": "V2T_TTS_PROVIDER",
@@ -481,6 +485,12 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         ),
         default=Settings.enforce_english_audio_text,
     )
+    llm_light = str(
+        _env_or_file("V2T_LLM_LIGHT_MODEL", file_cfg, "llm_light_model", Settings.llm_light_model)
+    )
+    video_max_workers = int(
+        _env_or_file("V2T_VIDEO_MAX_WORKERS", file_cfg, "video_max_workers", Settings.video_max_workers)
+    )
     voice_mode = str(
         _env_or_file("V2T_VOICE_MODE", file_cfg, "voice_mode", Settings.voice_mode)
     )
@@ -515,6 +525,8 @@ def _build_settings_from_dict(file_cfg: dict[str, Any]) -> Settings:
         video_watermark=vid_watermark,
         video_prompt_extend=vid_prompt_ext,
         enforce_english_audio_text=enforce_en_audio,
+        llm_light_model=llm_light,
+        video_max_workers=max(1, min(8, video_max_workers)),
         voice_mode=voice_mode,
         tts_model=tts_model,
         tts_provider=tts_provider,
@@ -559,3 +571,11 @@ def resolve_theme_idea_model(settings: Settings) -> str:
     if not m:
         raise ValueError(THEME_IDEA_MODEL_REQUIRED_MSG)
     return m
+
+
+def resolve_light_model(settings: Settings) -> str:
+    """轻量级任务使用的模型（默认 qwen3.5-flash），回退到 theme_story_model。"""
+    m = (settings.llm_light_model or "").strip()
+    if m:
+        return m
+    return resolve_theme_story_model(settings)

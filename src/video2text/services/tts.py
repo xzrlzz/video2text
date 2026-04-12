@@ -10,18 +10,13 @@
 
 from __future__ import annotations
 
-import io
 import json
 import logging
-import ssl
 import struct
-import time
-import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 
 from video2text.config.settings import Settings
 
@@ -148,6 +143,8 @@ class CosyVoiceTTS(TTSProvider):
 
     # ----- 内部实现 -----
 
+    _TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+
     def _run_ws_tts(
         self,
         text: str,
@@ -156,43 +153,47 @@ class CosyVoiceTTS(TTSProvider):
         speed: float,
         enable_timestamps: bool,
     ) -> TTSResult:
-        """通过 DashScope HTTP API 调用 CosyVoice（更稳定的方式）。"""
+        """通过 DashScope 非流式 SpeechSynthesizer API 调用 CosyVoice。"""
         import urllib.request
         import urllib.error
 
-        url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-synthesis"
+        input_obj: dict[str, Any] = {
+            "text": text,
+            "voice": voice,
+            "format": "wav",
+            "sample_rate": 22050,
+        }
+        if speed != 1.0:
+            input_obj["rate"] = speed
+        if enable_timestamps:
+            input_obj["word_timestamp_enabled"] = True
+
         body: dict[str, Any] = {
             "model": model,
-            "input": {"text": text},
-            "parameters": {
-                "voice": voice,
-                "format": "wav",
-                "sample_rate": 22050,
-                "rate": speed,
-            },
+            "input": input_obj,
         }
-        if enable_timestamps:
-            body["parameters"]["word_timestamp_enabled"] = True
 
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-            "X-DashScope-Async": "enable",
+            "Content-Type": "application/json",
         }
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        req = urllib.request.Request(self._TTS_URL, data=data, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 rsp = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"CosyVoice TTS 提交失败 HTTP {e.code}: {err_body}") from e
+            raise RuntimeError(f"CosyVoice TTS 失败 HTTP {e.code}: {err_body}") from e
 
-        task_id = (rsp.get("output") or {}).get("task_id")
-        if not task_id:
-            raise RuntimeError(f"CosyVoice TTS 无 task_id: {rsp}")
+        output = rsp.get("output") or {}
+        audio_info = output.get("audio") or {}
+        audio_url = audio_info.get("url", "")
 
-        return self._poll_tts_task(task_id, enable_timestamps)
+        if not audio_url:
+            raise RuntimeError(f"CosyVoice TTS 无音频 URL: {rsp}")
+
+        return self._download_tts_audio(audio_url, enable_timestamps, output)
 
     def _run_ws_clone(
         self,
@@ -205,6 +206,8 @@ class CosyVoiceTTS(TTSProvider):
         """声音克隆：先上传参考音频到 OSS，再调用 TTS。"""
         from dashscope.utils.oss_utils import check_and_upload_local
         import tempfile
+        import urllib.request
+        import urllib.error
 
         suffix = ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
@@ -218,33 +221,29 @@ class CosyVoiceTTS(TTSProvider):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-        import urllib.request
-        import urllib.error
+        input_obj: dict[str, Any] = {
+            "text": text,
+            "voice": audio_url,
+            "format": "wav",
+            "sample_rate": 22050,
+        }
+        if speed != 1.0:
+            input_obj["rate"] = speed
+        if enable_timestamps:
+            input_obj["word_timestamp_enabled"] = True
 
-        url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-synthesis"
         body: dict[str, Any] = {
             "model": model,
-            "input": {
-                "text": text,
-                "reference_audio": audio_url,
-            },
-            "parameters": {
-                "format": "wav",
-                "sample_rate": 22050,
-                "rate": speed,
-            },
+            "input": input_obj,
         }
-        if enable_timestamps:
-            body["parameters"]["word_timestamp_enabled"] = True
 
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-            "X-DashScope-Async": "enable",
+            "Content-Type": "application/json",
             "X-DashScope-OssResourceResolve": "enable",
         }
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        req = urllib.request.Request(self._TTS_URL, data=data, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 rsp = json.loads(resp.read().decode("utf-8"))
@@ -252,69 +251,51 @@ class CosyVoiceTTS(TTSProvider):
             err_body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"CosyVoice 克隆 TTS 失败 HTTP {e.code}: {err_body}") from e
 
-        task_id = (rsp.get("output") or {}).get("task_id")
-        if not task_id:
-            raise RuntimeError(f"CosyVoice 克隆 TTS 无 task_id: {rsp}")
+        output = rsp.get("output") or {}
+        audio_info = output.get("audio") or {}
+        audio_url_result = audio_info.get("url", "")
 
-        return self._poll_tts_task(task_id, enable_timestamps)
+        if not audio_url_result:
+            raise RuntimeError(f"CosyVoice 克隆 TTS 无音频 URL: {rsp}")
 
-    def _poll_tts_task(self, task_id: str, with_timestamps: bool) -> TTSResult:
-        """轮询异步 TTS 任务直到完成，下载音频。"""
+        return self._download_tts_audio(audio_url_result, enable_timestamps, output)
+
+    def _download_tts_audio(
+        self,
+        audio_url: str,
+        with_timestamps: bool,
+        output: dict[str, Any],
+    ) -> TTSResult:
+        """下载 TTS 音频并解析时间戳。"""
         import urllib.request
 
-        poll_url = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
-        deadline = time.monotonic() + 300
-        while time.monotonic() < deadline:
-            req = urllib.request.Request(
-                poll_url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                rsp = json.loads(resp.read().decode("utf-8"))
+        audio_req = urllib.request.Request(audio_url)
+        with urllib.request.urlopen(audio_req, timeout=120) as aresp:
+            audio_data = aresp.read()
 
-            out = rsp.get("output") or {}
-            status = out.get("task_status", "")
-            if status == "SUCCEEDED":
-                audio_url = out.get("audio_url") or out.get("results", [{}])[0].get("url", "")
-                if not audio_url:
-                    raise RuntimeError(f"TTS 任务完成但无音频 URL: {rsp}")
+        timestamps: list[WordTimestamp] = []
+        if with_timestamps:
+            ts_data = output.get("word_timestamps") or output.get("timestamps") or []
+            for item in ts_data:
+                timestamps.append(WordTimestamp(
+                    word=item.get("word", ""),
+                    begin_ms=int(item.get("begin_time", 0)),
+                    end_ms=int(item.get("end_time", 0)),
+                ))
 
-                audio_req = urllib.request.Request(audio_url)
-                with urllib.request.urlopen(audio_req, timeout=120) as aresp:
-                    audio_data = aresp.read()
+        duration_ms = 0
+        if timestamps:
+            duration_ms = max(t.end_ms for t in timestamps)
+        elif len(audio_data) > 44:
+            duration_ms = _estimate_wav_duration_ms(audio_data)
 
-                timestamps: list[WordTimestamp] = []
-                if with_timestamps:
-                    ts_data = out.get("word_timestamps") or out.get("timestamps") or []
-                    for item in ts_data:
-                        timestamps.append(WordTimestamp(
-                            word=item.get("word", ""),
-                            begin_ms=int(item.get("begin_time", 0)),
-                            end_ms=int(item.get("end_time", 0)),
-                        ))
-
-                duration_ms = 0
-                if timestamps:
-                    duration_ms = max(t.end_ms for t in timestamps)
-                elif len(audio_data) > 44:
-                    duration_ms = _estimate_wav_duration_ms(audio_data)
-
-                return TTSResult(
-                    audio_data=audio_data,
-                    audio_format="wav",
-                    sample_rate=22050,
-                    duration_ms=duration_ms,
-                    word_timestamps=timestamps,
-                )
-
-            if status == "FAILED":
-                raise RuntimeError(
-                    f"CosyVoice TTS 任务失败: {out.get('code')} {out.get('message', rsp)}"
-                )
-            time.sleep(2)
-
-        raise TimeoutError(f"CosyVoice TTS 任务超时: {task_id}")
+        return TTSResult(
+            audio_data=audio_data,
+            audio_format="wav",
+            sample_rate=22050,
+            duration_ms=duration_ms,
+            word_timestamps=timestamps,
+        )
 
 
 def _estimate_wav_duration_ms(wav_data: bytes) -> int:
