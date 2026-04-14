@@ -619,6 +619,52 @@ label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px
   line-height: 1.5;
   resize: vertical;
 }
+.subject-ref-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.subject-ref-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.subject-ref-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.subject-ref-drop {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-width: 120px;
+  max-width: 220px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.subject-ref-drop:hover { border-color: var(--primary); color: var(--text); }
+.subject-ref-drop.drag {
+  border-color: var(--primary);
+  background: rgba(124, 108, 240, 0.08);
+}
+.subject-ref-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 8px 0 0;
+  line-height: 1.45;
+}
 
 /* ── @mention chips ── */
 .mention-chip {

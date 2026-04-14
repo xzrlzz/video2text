@@ -201,20 +201,50 @@ Output JSON only."""
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     text = text.strip()
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    # 大小写不敏感地去掉 <think>...</think> 块（Qwen3 thinking 模式）
+    text = re.sub(r"(?i)<think>[\s\S]*?</think>", "", text).strip()
+
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         text = m.group(1).strip()
+
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
+        _log.warning("_extract_json_object: no JSON braces found; raw=%r", text[:300])
         raise ValueError(f"No JSON object in model output: {text[:500]}")
+
+    candidate = text[start : end + 1]
+
+    # 第一次尝试：直接解析
     try:
-        return json.loads(text[start : end + 1])
+        return json.loads(candidate)
     except json.JSONDecodeError:
-        cleaned = re.sub(r",\s*([}\]])", r"\1", text[start : end + 1])
+        pass
+
+    # 第二次尝试：清理常见问题
+    cleaned = candidate
+    # 去掉 trailing comma
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    # Python 式字面量 → JSON 式
+    cleaned = re.sub(r"\bNone\b", "null", cleaned)
+    cleaned = re.sub(r"\bTrue\b", "true", cleaned)
+    cleaned = re.sub(r"\bFalse\b", "false", cleaned)
+    # 单行注释
+    cleaned = re.sub(r"//[^\n]*", "", cleaned)
+    try:
         return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "_extract_json_object: parse failed (%s); raw_snippet=%r",
+            exc,
+            candidate[:400],
+        )
+        raise
 
 
 # API hard limit for base64-encoded data-uri payload (DashScope/OpenAI compatible APIs)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from typing import Any
 
 from openai import OpenAI
@@ -376,7 +377,8 @@ def _generate_story_outline(
             {"role": "system", "content": STORY_ARCHITECT_SYSTEM},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=8192,
+        max_tokens=16384,
+        extra_body={"enable_thinking": False},
     )
     raw = completion.choices[0].message.content or ""
     return _extract_json_object(raw)
@@ -414,6 +416,7 @@ def _generate_shots_from_outline(
             {"role": "user", "content": user_msg},
         ],
         max_tokens=16384,
+        extra_body={"enable_thinking": False},
     )
     raw = completion.choices[0].message.content or ""
     return _extract_json_object(raw)
@@ -449,21 +452,36 @@ def generate_storyboard_from_theme(
 
     # ------ Phase 1: Story Architect ------
     outline: dict[str, Any] | None = None
-    try:
-        log.info("Phase 1 — Story Architect: generating narrative outline…")
-        outline = _generate_story_outline(
-            theme, client, use_model, style_hint, min_shots, max_shots,
-        )
-        beats = outline.get("narrative_beats") or []
-        log.info(
-            "Phase 1 complete: title=%r, %d characters, %d beats",
-            outline.get("title", ""),
-            len(outline.get("characters") or []),
-            len(beats),
-        )
-    except Exception as exc:
-        log.warning("Phase 1 failed (%s), falling back to single-pass…", exc)
-        outline = None
+    _phase1_attempts = 2
+    for _attempt in range(1, _phase1_attempts + 1):
+        try:
+            log.info(
+                "Phase 1 — Story Architect: generating narrative outline… (attempt %d/%d)",
+                _attempt, _phase1_attempts,
+            )
+            outline = _generate_story_outline(
+                theme, client, use_model, style_hint, min_shots, max_shots,
+            )
+            beats = outline.get("narrative_beats") or []
+            log.info(
+                "Phase 1 complete: title=%r, %d characters, %d beats",
+                outline.get("title", ""),
+                len(outline.get("characters") or []),
+                len(beats),
+            )
+            break
+        except Exception as exc:
+            if _attempt < _phase1_attempts:
+                log.warning(
+                    "Phase 1 attempt %d/%d failed (%s), retrying…",
+                    _attempt, _phase1_attempts, exc,
+                )
+            else:
+                log.warning(
+                    "Phase 1 failed after %d attempts (%s), falling back to single-pass…",
+                    _phase1_attempts, exc,
+                )
+                outline = None
 
     # ------ Phase 2: Shot Designer (or legacy fallback) ------
     if outline and outline.get("narrative_beats"):
@@ -545,6 +563,7 @@ def _single_pass_generate(
             {"role": "user", "content": user_msg},
         ],
         max_tokens=16384,
+        extra_body={"enable_thinking": False},
     )
     raw = completion.choices[0].message.content or ""
     return _extract_json_object(raw)
@@ -606,6 +625,7 @@ def generate_next_shot(
             {"role": "user", "content": user_msg},
         ],
         max_tokens=4096,
+        extra_body={"enable_thinking": False},
     )
     raw = completion.choices[0].message.content or ""
     data = _extract_json_object(raw)
@@ -847,7 +867,28 @@ def _generate_ip_story_outline(
     if theme_hint.strip():
         user_msg += f"Episode theme hint: {theme_hint.strip()}\n\n"
     else:
-        user_msg += "Create an episode using one of the typical_plot_hooks as inspiration.\n\n"
+        hooks = profile.story_dna.typical_plot_hooks
+        if hooks:
+            chosen_hook = random.choice(hooks)
+            user_msg += (
+                f"No specific episode theme was provided. Use this randomly selected plot hook as inspiration: "
+                f"\"{chosen_hook}\"\n"
+                f"IMPORTANT: Make the story feel FRESH and UNEXPECTED — avoid repeating the same scenario, "
+                f"character dynamics, or resolution from any previous episodes. "
+                f"Introduce a new twist, setting detail, or character interaction angle.\n\n"
+            )
+        else:
+            user_msg += (
+                "No specific episode theme was provided. "
+                "Create a fresh, surprising episode. IMPORTANT: Make it feel distinctly different "
+                "from any previous episodes — vary the scenario, emotional tone, and resolution.\n\n"
+            )
+
+        last_outline = getattr(profile, "last_story_outline", None)
+        if last_outline and isinstance(last_outline, dict):
+            last_title = str(last_outline.get("title", "")).strip()
+            if last_title:
+                user_msg += f"The previous episode was titled \"{last_title}\". Do NOT repeat that storyline.\n\n"
 
     if profile.creative_guidelines:
         gl_lines = "\n".join(f"{i}. {g}" for i, g in enumerate(profile.creative_guidelines, 1))
@@ -865,7 +906,8 @@ def _generate_ip_story_outline(
             {"role": "system", "content": IP_STORY_ARCHITECT_SYSTEM},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=8192,
+        max_tokens=16384,
+        extra_body={"enable_thinking": False},
     )
     raw = completion.choices[0].message.content or ""
     return _extract_json_object(raw)
@@ -973,6 +1015,7 @@ def _generate_ip_shots_from_outline(
             {"role": "user", "content": user_msg},
         ],
         max_tokens=16384,
+        extra_body={"enable_thinking": False},
     )
     raw = completion.choices[0].message.content or ""
     return _extract_json_object(raw)

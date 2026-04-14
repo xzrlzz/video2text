@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 
 class CancellationError(Exception):
@@ -34,8 +34,6 @@ from video2text.services.wan_video import (
     preflight_reference_urls_for_r2v,
     uses_wan27_http,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from video2text.core.ip_manager import IPCharacter, IPProfile
@@ -1182,12 +1180,295 @@ def run_storyboard_clip_generation(
 
 
 # ---------------------------------------------------------------------------
+# 主题模式：按角色参考图（复用 IP per-chunk 检测与图N 改写）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SubjectCharacter:
+    """主题任务 subjects.json 中的角色，字段满足 detect/build_media 所需。"""
+
+    id: str
+    name: str
+    name_en: str
+    reference_image_path: str = ""
+
+
+def subjects_json_to_characters(subjects: list[dict[str, Any]]) -> list[SubjectCharacter]:
+    out: list[SubjectCharacter] = []
+    for i, d in enumerate(subjects):
+        en = str(d.get("name") or "").strip()
+        zh = str(d.get("name_zh") or "").strip()
+        out.append(
+            SubjectCharacter(
+                id=f"theme_subj_{i}",
+                name=zh or en,
+                name_en=en or zh,
+                reference_image_path=str(d.get("reference_image_path") or "").strip(),
+            )
+        )
+    return out
+
+
+def build_subject_ref_wan_clip_tasks(
+    doc: StoryboardDocument,
+    characters: list[SubjectCharacter],
+    settings: Settings,
+    char_url_map: dict[str, str],
+    *,
+    style_keywords: str = "",
+    max_segment_seconds: float = 10.0,
+    poll_callback: Callable[[str], None] | None = None,
+) -> list[WanClipTask]:
+    """主题模式：每段按分镜检测出场角色，注入对应参考图并改写 prompt（同 IP 策略）。"""
+    shots = doc.shots
+    if not shots:
+        raise ValueError("Storyboard has no shots")
+
+    dur_cap = model_max_duration_seconds(settings.video_ref_model)
+    max_seg_eff = max(2.0, min(float(max_segment_seconds), float(dur_cap), 10.0))
+    chunks = chunk_shots_by_max_duration(shots, max_seg_eff)
+    style_kw = (style_keywords or "").strip()
+
+    cb = poll_callback or (lambda _: None)
+    cb(
+        f"主题·角色参考：{len(chunks)} 段，{len(characters)} 个主体，"
+        f"{len(char_url_map)} 张参考图已上传"
+    )
+
+    tasks: list[WanClipTask] = []
+    for i, chunk in enumerate(chunks):
+        chunk_chars = detect_characters_in_chunk(chunk, list(characters))
+
+        has_character_intent = any(
+            shot.characters_in_shot or shot.focal_character
+            for shot in chunk
+        )
+        if not chunk_chars and has_character_intent and poll_callback:
+            poll_callback(
+                f"⚠ 第 {i + 1}/{len(chunks)} 段：分镜标注了角色但未匹配到主体，"
+                f"请检查主体卡片英文名/中文名与分镜一致"
+            )
+
+        media, name_map = build_ip_media_array(chunk_chars, char_url_map)
+        ref_urls = [m["url"] for m in media if m["type"] == "image"]
+        ref_hint = _build_ip_ref_hint(name_map) if ref_urls else ""
+
+        prompt, dur = build_wan_multi_shot_prompt(
+            chunk,
+            "",
+            ref_hint,
+            max_duration=dur_cap,
+            enforce_english_audio_text=settings.enforce_english_audio_text,
+        )
+        prompt = rewrite_prompt_for_ip_refs(prompt, name_map, style_kw)
+
+        if poll_callback:
+            if chunk_chars:
+                char_names = [c.name for c in chunk_chars[:5]]
+                poll_callback(
+                    f"第 {i + 1}/{len(chunks)} 段：{len(chunk)} 镜头，"
+                    f"角色 {char_names}，{len(ref_urls)} 张参考图"
+                )
+            else:
+                poll_callback(
+                    f"第 {i + 1}/{len(chunks)} 段：{len(chunk)} 镜头，"
+                    f"无角色参考（环境镜头），走 t2v"
+                )
+
+        tasks.append(
+            WanClipTask(
+                index=i,
+                prompt=prompt,
+                duration=dur,
+                reference_urls=ref_urls,
+                reference_video_urls=[],
+                reference_video_descriptions=[],
+                chunk_size=len(chunk),
+                reference_voice_url="",
+                audio=None,
+            )
+        )
+
+    return tasks
+
+
+def run_subject_ref_storyboard_generation(
+    doc: StoryboardDocument,
+    subjects: list[dict[str, Any]],
+    settings: Settings,
+    *,
+    segments_dir: Path,
+    output_mp4: Path,
+    size: str | None = None,
+    max_segment_seconds: float = 10.0,
+    style_keywords: str = "",
+    progress_cb: Callable[[str], None] | None = None,
+    meta_update: Callable[[dict[str, Any]], None] | None = None,
+    max_workers: int = 2,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """主题任务：按角色参考图生成视频（无音色管线）。"""
+    cb = progress_cb or (lambda _: None)
+    log.info(
+        "主题角色参考视频管线启动: %d 镜头, style=%s",
+        len(doc.shots),
+        (style_keywords or "")[:80],
+    )
+
+    characters = subjects_json_to_characters(subjects)
+    cb("正在上传角色参考图…")
+    char_url_map = preflight_ip_character_images(characters, settings)
+    log.info("主题角色参考图上传完成: %d 张", len(char_url_map))
+    cb(f"已上传 {len(char_url_map)} 张角色参考图")
+
+    tasks = build_subject_ref_wan_clip_tasks(
+        doc,
+        characters,
+        settings,
+        char_url_map,
+        style_keywords=style_keywords,
+        max_segment_seconds=max_segment_seconds,
+        poll_callback=cb,
+    )
+
+    _, full_map = build_ip_media_array(characters, char_url_map)
+    if full_map:
+        doc.ip_char_ref_map = full_map
+        storyboard_path = segments_dir.parent / "storyboard.json"
+        if storyboard_path.is_file():
+            doc.save_json(storyboard_path)
+
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    if meta_update:
+        meta_update({
+            "segments_total": len(tasks),
+            "segments_done": _count_valid_segments(segments_dir),
+        })
+
+    pending_tasks: list[WanClipTask] = []
+    for t in tasks:
+        seg_path = segments_dir / f"seg_{t.index:03d}.mp4"
+        if seg_path.is_file() and seg_path.stat().st_size > 1024:
+            cb(f"使用缓存片段 {t.index + 1}/{len(tasks)}")
+        else:
+            pending_tasks.append(t)
+
+    if cancel_event and cancel_event.is_set():
+        raise CancellationError("用户取消了任务")
+
+    _meta_lock = threading.Lock()
+    _active_segments: dict[int, str] = {}
+    _last_broadcast: str = ""
+
+    def _broadcast_progress() -> None:
+        nonlocal _last_broadcast
+        with _meta_lock:
+            done_count = _count_valid_segments(segments_dir)
+            parts = []
+            for idx in sorted(_active_segments):
+                parts.append(f"段{idx + 1}: {_active_segments[idx]}")
+            active_str = " | ".join(parts) if parts else ""
+        total = len(tasks)
+        summary = f"已完成 {done_count}/{total}"
+        if active_str:
+            summary += f"  ▶ {active_str}"
+        if summary != _last_broadcast:
+            _last_broadcast = summary
+            cb(summary)
+
+    def run_one(t: WanClipTask) -> None:
+        if cancel_event and cancel_event.is_set():
+            raise CancellationError("用户取消了任务")
+        log.info(
+            "主题角色参考段 %d/%d 开始（约 %ds，%d 镜）",
+            t.index + 1,
+            len(tasks),
+            t.duration,
+            t.chunk_size,
+        )
+
+        with _meta_lock:
+            _active_segments[t.index] = "提交中"
+        _broadcast_progress()
+
+        def _poll_cb(_msg: str) -> None:
+            with _meta_lock:
+                _active_segments[t.index] = "渲染中"
+            _broadcast_progress()
+
+        ref_u = t.reference_urls or None
+        if ref_u:
+            url = generate_wan27_clip(
+                settings,
+                t.prompt,
+                t.duration,
+                reference_image_urls=ref_u,
+                reference_voice_url=None,
+                audio=t.audio,
+                size=size,
+                poll_callback=_poll_cb,
+            )
+        else:
+            url = generate_video_clip(
+                t.prompt,
+                t.duration,
+                settings,
+                size=size,
+                poll_callback=_poll_cb,
+            )
+        with _meta_lock:
+            _active_segments[t.index] = "下载中"
+        _broadcast_progress()
+
+        seg_path = segments_dir / f"seg_{t.index:03d}.mp4"
+        download_url(url, seg_path)
+        with _meta_lock:
+            del _active_segments[t.index]
+            if meta_update:
+                meta_update({"segments_done": _count_valid_segments(segments_dir)})
+        log.info("主题角色参考段 %d/%d 完成", t.index + 1, len(tasks))
+        _broadcast_progress()
+
+    if pending_tasks:
+        effective_workers = max(1, min(max_workers, len(pending_tasks)))
+        if len(pending_tasks) > 1:
+            cb(f"并发生成 {len(pending_tasks)} 个片段（并发数 {effective_workers}）…")
+            log.info(
+                "主题角色参考并发生成 %d 段（并发数 %d）",
+                len(pending_tasks),
+                effective_workers,
+            )
+        with ThreadPoolExecutor(max_workers=effective_workers) as ex:
+            futs = [ex.submit(run_one, t) for t in pending_tasks]
+            for fut in as_completed(futs):
+                fut.result()
+
+    paths = sorted(segments_dir.glob("seg_*.mp4"))
+    valid_paths = [p for p in paths if p.stat().st_size > 1024]
+    if len(valid_paths) != len(tasks):
+        raise RuntimeError(
+            f"片段数量不一致：期望 {len(tasks)}，实际 {len(valid_paths)}"
+        )
+
+    log.info("主题角色参考：拼接（%d 段）", len(valid_paths))
+    cb("正在拼接最终视频…")
+    try:
+        concat_videos_ffmpeg(valid_paths, output_mp4)
+    except subprocess.CalledProcessError:
+        reencode_concat(valid_paths, output_mp4)
+    log.info("视频拼接完成: %s", output_mp4.name)
+    cb(f"完成：{output_mp4.name}")
+    return output_mp4
+
+
+# ---------------------------------------------------------------------------
 # IP 模式：角色参考注入管线
 # ---------------------------------------------------------------------------
 
 
 def preflight_ip_character_images(
-    characters: list[IPCharacter],
+    characters: list[Any],
     settings: Settings,
 ) -> dict[str, str]:
     """上传所有角色参考图到 OSS，返回 {char_id: public_url} 映射。
@@ -1255,8 +1536,8 @@ def preflight_ip_character_voices(
 
 def detect_characters_in_chunk(
     chunk: list[Shot],
-    characters: list[IPCharacter],
-) -> list[IPCharacter]:
+    characters: list[Any],
+) -> list[Any]:
     """检测 chunk 中出现的 IP 角色，按出现频率排序。
 
     匹配逻辑：角色的 name、name_en 出现在 characters_in_shot / generation_prompt /
@@ -1269,7 +1550,7 @@ def detect_characters_in_chunk(
         for n in shot.characters_in_shot:
             annotated.add(n.strip().lower())
 
-    scored: list[tuple[int, IPCharacter]] = []
+    scored: list[tuple[int, Any]] = []
     for char in characters:
         score = 0
         names = [char.name.lower(), char.name_en.lower()]
@@ -1289,7 +1570,7 @@ def detect_characters_in_chunk(
 
 
 def build_ip_media_array(
-    chunk_characters: list[IPCharacter],
+    chunk_characters: list[Any],
     char_url_map: dict[str, str],
     max_refs: int = 5,
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
@@ -1389,8 +1670,12 @@ def build_ip_wan_clip_tasks(
     cb(f"IP 模式：{len(chunks)} 段，{len(characters)} 个角色，{len(char_url_map)} 张参考图已上传")
     if voice_mode == "native" and voice_map:
         cb(f"声音模式：原生音色（{len(voice_map)} 个角色有参考音频）")
+    elif voice_mode == "native":
+        cb("声音模式：原生音色（无参考音频，万相自行配音）")
     elif voice_mode == "pipeline":
-        cb("声音模式：独立音频管线（生成静音视频）")
+        cb("声音模式：独立音频管线（生成静音视频 + TTS 配音）")
+    elif voice_mode == "silent":
+        cb("声音模式：静音（纯画面，无任何声音）")
 
     tasks: list[WanClipTask] = []
     for i, chunk in enumerate(chunks):
@@ -1427,7 +1712,7 @@ def build_ip_wan_clip_tasks(
                 if vu:
                     chunk_voice_url = vu
                     break
-        elif voice_mode == "pipeline":
+        elif voice_mode in ("pipeline", "silent"):
             chunk_audio = False
 
         if poll_callback:

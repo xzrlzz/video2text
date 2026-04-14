@@ -495,6 +495,11 @@
           }
           refreshTaskOnce(task_id);
           if (task_id === currentTaskId) {
+            // 确保 step2/3/4 可见（分析模式也需展示分镜预览等步骤）
+            ['step2', 'step3', 'step4'].forEach(id => {
+              const el = document.getElementById(id);
+              if (el) el.classList.remove('hidden');
+            });
             showToast(`分镜已生成（${data.shot_count || '?'} 镜），请查看步骤 3 预览`, 'success', 4000);
             $('#step3').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
           }
@@ -750,6 +755,46 @@
     }
   }
 
+  /** 主题任务：主体卡片中 subject_N 参考图的预览 URL */
+  function subjectRefPreviewUrl(taskId, subj) {
+    const p = String(subj.reference_image_path || '').replace(/\\/g, '/');
+    if (!p) return '';
+    const fname = p.split('/').pop() || '';
+    if (!fname.startsWith('subject_')) return '';
+    return `/api/files/${taskId}/references/${encodeURIComponent(fname)}`;
+  }
+
+  async function uploadSubjectReference(index, file) {
+    if (!currentTaskId || !file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch(`/api/task/subjects/${currentTaskId}/upload/${index}`, { method: 'POST', body: fd });
+      if (r.status === 401) { window.location.href = '/login'; return; }
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast(j.error || '上传失败'); return; }
+      const t = getTask(currentTaskId);
+      t.subjects = j.subjects || t.subjects;
+      renderSubjects();
+      showToast('角色参考图已上传', 'success', 2500);
+    } catch (e) {
+      showToast('上传失败：' + (e.message || e));
+    }
+  }
+
+  async function deleteSubjectReference(index) {
+    if (!currentTaskId) return;
+    try {
+      const j = await api(`/api/task/subjects/${currentTaskId}/reference/${index}`, { method: 'DELETE' });
+      const t = getTask(currentTaskId);
+      t.subjects = j.subjects || [];
+      renderSubjects();
+      showToast('已移除参考图', 'success', 2000);
+    } catch (e) {
+      showToast('移除失败：' + (e.message || e));
+    }
+  }
+
   async function saveSubjects() {
     if (!currentTaskId) return;
     const t = getTask(currentTaskId);
@@ -851,6 +896,7 @@
     }
 
     (t.subjects || []).forEach((subj, idx) => {
+      const refUrl = currentTaskId ? subjectRefPreviewUrl(currentTaskId, subj) : '';
       const card = document.createElement('div');
       card.className = 'subject-card';
       card.dataset.sidx = idx;
@@ -876,6 +922,16 @@
             <textarea data-sidx="${idx}" data-sfield="description_zh" rows="3"
               placeholder="中文描述，失焦后自动翻译为英文…">${escapeHtml(subj.description_zh || '')}</textarea>
           </div>
+        </div>
+        <div class="subject-ref-row">
+          <label class="subject-field-label">角色参考图 <span class="field-tag">按角色 r2v</span></label>
+          <div class="subject-ref-upload">
+            ${refUrl ? `<img class="subject-ref-thumb" src="${escapeAttr(refUrl)}" alt="" />` : ''}
+            <div class="subject-ref-drop" data-sidx="${idx}" title="点击或拖入图片">${refUrl ? '更换图片' : '点击 / 拖放上传'}</div>
+            <input type="file" accept="image/*" class="hidden subject-ref-file" data-sidx="${idx}" />
+            ${refUrl ? `<button type="button" class="ghost sm subject-ref-del" data-sidx="${idx}">移除</button>` : ''}
+          </div>
+          <p class="subject-ref-hint">分镜生成后上传，名称需与分镜对白/动作中的角色一致；生成时按镜头自动选用参考图（与 IP 模式相同策略）。</p>
         </div>`;
       list.appendChild(card);
     });
@@ -915,6 +971,34 @@
         renderSubjects();
         renderShots(); // 刷新 chip 高亮
       };
+    });
+
+    list.querySelectorAll('.subject-ref-drop').forEach((drop) => {
+      const idx = +drop.dataset.sidx;
+      const inp = list.querySelector(`.subject-ref-file[data-sidx="${idx}"]`);
+      drop.onclick = (ev) => {
+        if (ev.target.closest('.subject-ref-del')) return;
+        if (inp) inp.click();
+      };
+      drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('drag'); };
+      drop.ondragleave = () => drop.classList.remove('drag');
+      drop.ondrop = (e) => {
+        e.preventDefault();
+        drop.classList.remove('drag');
+        const f = e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f && f.type.startsWith('image/')) uploadSubjectReference(idx, f);
+        else if (f) showToast('请上传图片文件');
+      };
+    });
+    list.querySelectorAll('.subject-ref-file').forEach((inp) => {
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (f) uploadSubjectReference(+inp.dataset.sidx, f);
+        inp.value = '';
+      };
+    });
+    list.querySelectorAll('.subject-ref-del').forEach((btn) => {
+      btn.onclick = () => deleteSubjectReference(+btn.dataset.sidx);
     });
   }
 
@@ -1380,6 +1464,26 @@
         max_workers: maxWorkers,
       };
     }
+
+    const hasSubjectRefs = (t.subjects || []).some(
+      s => s.reference_image_path && String(s.reference_image_path).trim()
+    );
+    if (hasSubjectRefs) {
+      return {
+        task_id: currentTaskId,
+        text_only_video: false,
+        use_subject_refs: true,
+        reference_images: [],
+        reference_videos: [],
+        reference_video_descriptions: [],
+        subject_lines: [],
+        style: $('#gen-style').value.trim(),
+        resolution: $('#gen-resolution').value.trim() || null,
+        max_segment_seconds: parseFloat($('#max-seg').value) || 15,
+        max_workers: maxWorkers,
+      };
+    }
+
     return {
       task_id: currentTaskId,
       text_only_video: false,
@@ -1415,11 +1519,11 @@
       $('#panel-theme').classList.toggle('hidden', tab !== 'theme');
       $('#panel-ip-mode').classList.toggle('hidden', tab !== 'ip-mode');
       $('#panel-analyze').classList.toggle('hidden', tab !== 'analyze');
-      // 普通模式的全局步骤卡片在 IP/分析模式下隐藏
-      const isNormalMode = (tab !== 'ip-mode' && tab !== 'analyze');
+      // step2/3/4 仅在主题模式下立即显示；分析模式在分析完成后才展示；IP 模式有自己的步骤
+      const showSteps = (tab !== 'ip-mode' && tab !== 'analyze');
       ['step2', 'step3', 'step4'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.classList.toggle('hidden', !isNormalMode);
+        if (el) el.classList.toggle('hidden', !showSteps);
       });
       if (tab === 'ip-mode') {
         loadIPList().then(() => {
@@ -1571,6 +1675,11 @@
         }
         connectSSE(currentTaskId);
         renderStatusBar();
+        // 分析任务提交后确保 step4（进度日志）可见
+        ['step2', 'step3', 'step4'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.classList.remove('hidden');
+        });
         $('#step4').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       } catch (e) {
         showToast('提交失败：' + e.message);
@@ -1611,7 +1720,10 @@
       }
 
       // ── 参考模式检查 ──
-      if (!$('#text-only').checked) {
+      const hasSubjectRefs = (t.subjects || []).some(
+        s => s.reference_image_path && String(s.reference_image_path).trim()
+      );
+      if (!$('#text-only').checked && !hasSubjectRefs) {
         if (!t.imageRefs.length && !t.videoRefs.length) {
           if (!confirm('未上传参考图/视频，将使用纯文生模式。继续？')) return;
           $('#text-only').checked = true;
@@ -1724,6 +1836,11 @@
           connectSSE(currentTaskId);
         }
         renderStatusBar();
+        // 分析任务提交后确保步骤卡片可见
+        ['step2', 'step3', 'step4'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.classList.remove('hidden');
+        });
         $('#step4').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       } catch (e) {
         showToast('提交失败：' + e.message);
@@ -1927,6 +2044,32 @@
       f.maxWorkers = String(genParams.max_workers || 4);
 
       connectSSE(task_id);
+
+      // 根据任务类型自动切换到对应的标签页
+      const taskType = st.type || '';
+      if (taskType === 'analyze' && $('#source-tabs')) {
+        $('#source-tabs').querySelectorAll('button').forEach(x => x.classList.remove('active'));
+        const analyzeBtn = $('#source-tabs').querySelector('[data-tab="analyze"]');
+        if (analyzeBtn) analyzeBtn.classList.add('active');
+        $('#panel-theme').classList.add('hidden');
+        $('#panel-ip-mode').classList.add('hidden');
+        $('#panel-analyze').classList.remove('hidden');
+      } else if (taskType === 'theme' && $('#source-tabs')) {
+        $('#source-tabs').querySelectorAll('button').forEach(x => x.classList.remove('active'));
+        const themeBtn = $('#source-tabs').querySelector('[data-tab="theme"]');
+        if (themeBtn) themeBtn.classList.add('active');
+        $('#panel-theme').classList.remove('hidden');
+        $('#panel-ip-mode').classList.add('hidden');
+        $('#panel-analyze').classList.add('hidden');
+      }
+      // 非 IP 任务确保 step2/3/4 可见
+      if (taskType !== 'ip-theme') {
+        ['step2', 'step3', 'step4'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.classList.remove('hidden');
+        });
+      }
+
       switchTask(task_id);
       renderStatusBar();
     } catch (e) {
@@ -2369,11 +2512,27 @@
       ipStoryOutline = ip.last_story_outline;
       renderIPStoryPreview(ip.last_story_outline);
 
-      // 恢复分镜预览
+      // 恢复分镜预览（无 task_id 时必须清空内存态，避免沿用上一条 IP 的续跑 ID）
       const sbTaskId = ip.last_story_outline._last_storyboard_task_id;
       if (sbTaskId) {
         _ipLastStoryboardTaskId = sbTaskId;
         _loadIPStoryboardPreview(sbTaskId);
+      } else {
+        _ipLastStoryboardTaskId = null;
+        _ipStoryboardShots = [];
+        const sbPrev = $('#ip-storyboard-preview');
+        if (sbPrev) {
+          sbPrev.innerHTML = '';
+          sbPrev.classList.add('hidden');
+        }
+      }
+    } else {
+      _ipLastStoryboardTaskId = null;
+      _ipStoryboardShots = [];
+      const sbPrev = $('#ip-storyboard-preview');
+      if (sbPrev) {
+        sbPrev.innerHTML = '';
+        sbPrev.classList.add('hidden');
       }
     }
 
@@ -2406,6 +2565,8 @@
         currentIPId = '';
         currentIPData = null;
         ipStoryOutline = null;
+        _ipLastStoryboardTaskId = null;
+        _ipStoryboardShots = [];
         ipSetStep(1);
         return;
       }
@@ -2855,6 +3016,23 @@
     const logArea = $('#ip-char-log');
     const btn = $('#btn-gen-all-char-images');
     let lastLen = 0;
+    const container = $('#ip-char-cards');
+
+    function _applyPartialIPUpdate(partialIP) {
+      if (!partialIP || !container) return;
+      const ipId = partialIP.id;
+      (partialIP.characters || []).forEach(c => {
+        if (!c.reference_image_path) return;
+        const regenBtn = container.querySelector(`[data-action="regen"][data-char-id="${c.id}"]`);
+        if (!regenBtn) return;
+        const cardEl = regenBtn.closest('.ip-char-card');
+        if (!cardEl) return;
+        const imgWrap = cardEl.querySelector('.ip-char-card-img');
+        if (!imgWrap || imgWrap.querySelector('img')) return; // 已有图片则跳过
+        imgWrap.innerHTML = `<img src="/api/ip/${ipId}/character/${c.id}/image?t=${Date.now()}" data-full-src="/api/ip/${ipId}/character/${c.id}/image?t=${Date.now()}" onerror="this.parentNode.innerHTML='<div class=\\'char-img-placeholder\\'>图片加载失败</div>'" title="点击查看大图" />`;
+      });
+    }
+
     const timer = setInterval(async () => {
       try {
         const task = await api(`/api/task/${taskId}`);
@@ -2867,6 +3045,8 @@
           logArea.scrollTop = logArea.scrollHeight;
         }
         lastLen = progress.length;
+        // 每张图生成完后后端即推送局部 IP 数据，在此实时刷新对应卡片
+        if (task.ip) _applyPartialIPUpdate(task.ip);
         if (task.status === 'done' || task.status === 'failed') {
           clearInterval(timer);
           btn.disabled = false; btn.textContent = '生成全部角色图';
@@ -3428,6 +3608,8 @@
         statusDiv.textContent = '生成完成';
         showToast('任务完成', 'success');
         _ipVideoAppendLog('✅ 任务完成');
+        _refreshIPSegmentsAndOutput(taskId);
+        if (onDone) onDone();
       } else if (status === 'storyboard_ready') {
         statusDiv.textContent = '分镜就绪';
         showToast('分镜生成完成', 'success');
@@ -3763,6 +3945,11 @@
         });
         statusDiv.textContent = '正在生成分镜…';
         _ipLastStoryboardTaskId = data.task_id;
+        // 收到 task_id 后立即写入大纲，避免 SSE 完成前刷新/切页导致丢失续跑 ID，从而生视频时新建任务、磁盘上尚无分镜
+        if (ipStoryOutline) {
+          ipStoryOutline._last_storyboard_task_id = data.task_id;
+          api('/api/ip/' + currentIPId + '/outline', { method: 'PUT', json: true, body: { outline: ipStoryOutline } }).catch(() => {});
+        }
         _connectIPTaskSSE(data.task_id, statusDiv, btn, '生成 IP 分镜', async () => {
           await _loadIPStoryboardPreview(data.task_id);
           if (ipStoryOutline) {
@@ -3835,7 +4022,8 @@
           voice_mode: voiceMode,
           resolution: resolution,
         };
-        if (_ipLastStoryboardTaskId) reqBody.resume_task_id = _ipLastStoryboardTaskId;
+        const resumeSb = _ipLastStoryboardTaskId || (ipStoryOutline && ipStoryOutline._last_storyboard_task_id);
+        if (resumeSb) reqBody.resume_task_id = resumeSb;
         const data = await api('/api/task/ip-theme', {
           method: 'POST', json: true,
           body: reqBody,

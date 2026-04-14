@@ -247,6 +247,7 @@ def generate_character_images(
     *,
     char_ids: list[str] | None = None,
     progress_cb: Any = None,
+    char_done_cb: Any = None,
 ) -> IPProfile:
     """为 IP 中的角色生成参考图。
 
@@ -256,6 +257,8 @@ def generate_character_images(
         settings: 配置
         char_ids: 只为指定角色生成；None 则为所有缺图的角色生成
         progress_cb: 可选的进度回调 (message: str) -> None
+        char_done_cb: 可选的单角色完成回调 (profile: IPProfile) -> None，
+                      每生成一张图后立即触发，可用于实时推送局部更新
 
     Returns:
         更新后的 IPProfile
@@ -268,6 +271,7 @@ def generate_character_images(
         return profile
 
     cb = progress_cb or (lambda m: None)
+    on_char_done = char_done_cb or (lambda p: None)
     total = len(targets)
 
     for i, char in enumerate(targets, 1):
@@ -287,6 +291,8 @@ def generate_character_images(
             char.reference_image_path = str(img_path)
             char.reference_type = "generated"
             cb(f"角色 {char.name} 参考图已生成")
+            save_ip(username, profile)
+            on_char_done(profile)
         except Exception as exc:
             err_str = str(exc)
             log.error("Failed to generate image for %s: %s", char.name, exc)
@@ -306,6 +312,8 @@ def generate_character_images(
                         char.reference_image_path = str(img_path)
                         char.reference_type = "generated"
                         cb(f"角色 {char.name} 参考图已生成（自动修正后）")
+                        save_ip(username, profile)
+                        on_char_done(profile)
                         continue
                 except Exception as exc2:
                     log.error("Retry also failed for %s: %s", char.name, exc2)

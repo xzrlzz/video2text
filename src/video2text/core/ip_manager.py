@@ -12,12 +12,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 from video2text.utils.paths import get_data_dir
 
@@ -290,6 +295,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """原子写 JSON：先写临时文件再 rename，避免并发写或中断导致文件损坏。"""
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    dir_ = path.parent
+    dir_.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)  # 原子替换（同一文件系统内）
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_ip(username: str, profile: IPProfile) -> Path:
     """保存 IP 元数据到 JSON 文件，返回文件路径。"""
     profile.updated_at = _now_iso()
@@ -300,30 +323,48 @@ def save_ip(username: str, profile: IPProfile) -> Path:
     ip_dir.mkdir(parents=True, exist_ok=True)
 
     p = _ip_json_path(username, profile.id)
-    p.write_text(
-        json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _atomic_write_json(p, profile.to_dict())
 
     for char in profile.characters:
         char_dir = _char_dir(username, profile.id, char.id)
         char_dir.mkdir(parents=True, exist_ok=True)
         meta_path = char_dir / "meta.json"
-        meta_path.write_text(
-            json.dumps(char.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _atomic_write_json(meta_path, char.to_dict())
 
     return p
 
 
+def _read_json_file(p: Path) -> Any:
+    """读取 JSON 文件，容忍文件末尾存在非 UTF-8 垃圾数据（并发写入污染场景）。
+
+    策略：
+      1. 先用 UTF-8 解码；若失败用 errors='replace' 兜底（把无效字节换成 U+FFFD）。
+      2. 用 raw_decode 只解析首个合法 JSON 对象，忽略其后的任何垃圾。
+    """
+    raw = p.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+
+    obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
+    return obj
+
+
 def load_ip(username: str, ip_id: str) -> IPProfile | None:
-    """加载单个 IP，不存在返回 None。"""
+    """加载单个 IP，不存在或文件损坏返回 None。"""
     p = _ip_json_path(username, ip_id)
     if not p.is_file():
         return None
-    data = json.loads(p.read_text(encoding="utf-8"))
-    return IPProfile.from_dict(data)
+    try:
+        data = _read_json_file(p)
+        return IPProfile.from_dict(data)
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        log.error(
+            "load_ip: corrupted ip.json for user=%s ip_id=%s (%s); file=%s",
+            username, ip_id, exc, p,
+        )
+        return None
 
 
 def list_ips(username: str) -> list[IPProfile]:

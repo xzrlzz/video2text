@@ -56,6 +56,7 @@ from video2text.pipeline.generator import (
     parse_character_pool,
     reference_subject_lock_hint,
     run_storyboard_clip_generation,
+    run_subject_ref_storyboard_generation,
 )
 
 from video2text.web.auth import get_current_user, init_auth, is_current_user_admin
@@ -815,6 +816,12 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
 
         doc = StoryboardDocument.load_json(sb)
         text_only = bool(params.get("text_only_video"))
+        subjects_disk = _read_subjects(task_id)
+        use_subject_refs = bool(params.get("use_subject_refs"))
+        has_subject_paths = any(
+            str(s.get("reference_image_path") or "").strip()
+            for s in subjects_disk
+        )
 
         ref_images = [str(x) for x in (params.get("reference_images") or []) if x]
         ref_videos = [str(x) for x in (params.get("reference_videos") or []) if x]
@@ -830,10 +837,16 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
             char_pool = parse_character_pool(subject_lines)
             if char_pool:
                 log(f"角色池已解析：{', '.join(e.name for e in char_pool)}（共 {len(char_pool)} 个角色）")
+        elif use_subject_refs:
+            if not has_subject_paths:
+                raise ValueError(
+                    "已启用按角色参考生，请至少为一个角色上传参考图（步骤 2 主体卡片）"
+                )
         else:
             if not ref_images and not ref_videos and settings.require_reference:
                 raise ValueError(
-                    "参考生需要上传参考图或视频，或勾选「纯文生（无参考）」"
+                    "参考生需要上传参考图或视频，或勾选「纯文生（无参考）」，"
+                    "或在主体卡片上传角色参考图并启用按角色参考生"
                 )
 
         if ref_videos and ref_video_descs and len(ref_videos) != len(ref_video_descs):
@@ -848,51 +861,86 @@ def _run_generate_job(task_id: str, params: dict[str, Any]) -> None:
         resolution = params.get("resolution") or None
         max_workers = int(params.get("max_workers") or settings.max_workers)
 
-        has_refs = bool(ref_images or ref_videos)
-        dur_cap = generation_duration_cap(settings, has_refs)
-        max_seg_eff = max(2.0, min(max_seg, float(dur_cap)))
+        if use_subject_refs and not text_only:
+            dur_cap = generation_duration_cap(settings, True)
+            max_seg_eff = max(2.0, min(max_seg, float(dur_cap)))
+            assign_generation_prompts(
+                doc,
+                style,
+                max_segment_seconds=max_seg_eff,
+                subject_descriptions=[],
+                api_duration_cap=dur_cap,
+                reference_hint="",
+                character_pool=None,
+                settings=settings,
+            )
+            sb.write_text(
+                json.dumps(doc.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            log(f"模式：主题·按角色参考生 r2v {settings.video_ref_model}")
+            log(f"并发数：{max_workers}")
+            td = _task_dir(task_id)
+            run_subject_ref_storyboard_generation(
+                doc,
+                subjects_disk,
+                settings,
+                segments_dir=td / "segments",
+                output_mp4=td / "output.mp4",
+                size=resolution,
+                max_segment_seconds=max_seg_eff,
+                style_keywords=style,
+                progress_cb=log,
+                meta_update=lambda d: _write_task_meta(task_id, d),
+                max_workers=max_workers,
+                cancel_event=cancel_event,
+            )
+        else:
+            has_refs = bool(ref_images or ref_videos)
+            dur_cap = generation_duration_cap(settings, has_refs)
+            max_seg_eff = max(2.0, min(max_seg, float(dur_cap)))
 
-        ref_hint = reference_subject_lock_hint(settings, has_refs)
-        assign_generation_prompts(
-            doc,
-            style,
-            max_segment_seconds=max_seg_eff,
-            subject_descriptions=subject_lines,
-            api_duration_cap=dur_cap,
-            reference_hint=ref_hint,
-            character_pool=char_pool,
-            settings=settings,
-        )
-        sb.write_text(
-            json.dumps(doc.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+            ref_hint = reference_subject_lock_hint(settings, has_refs)
+            assign_generation_prompts(
+                doc,
+                style,
+                max_segment_seconds=max_seg_eff,
+                subject_descriptions=subject_lines,
+                api_duration_cap=dur_cap,
+                reference_hint=ref_hint,
+                character_pool=char_pool,
+                settings=settings,
+            )
+            sb.write_text(
+                json.dumps(doc.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
-        log(
-            f"模式：{'文生 t2v' if not has_refs else '参考生 r2v ' + settings.video_ref_model}"
-        )
-        log(f"并发数：{max_workers}")
+            log(
+                f"模式：{'文生 t2v' if not has_refs else '参考生 r2v ' + settings.video_ref_model}"
+            )
+            log(f"并发数：{max_workers}")
 
-        td = _task_dir(task_id)
-        run_storyboard_clip_generation(
-            doc,
-            settings,
-            style=style,
-            size=resolution,
-            max_segment_seconds=max_seg_eff,
-            subject_descriptions=subject_lines,
-            reference_urls=ref_images,
-            reference_video_urls=ref_videos,
-            reference_video_descriptions=ref_video_descs,
-            per_chunk_reference_filter=settings.per_chunk_reference_filter,
-            character_pool=char_pool,
-            progress_callback=log,
-            checkpoint_dir=td / "segments",
-            output_video=td / "output.mp4",
-            meta_update=lambda d: _write_task_meta(task_id, d),
-            max_workers=max_workers,
-            cancel_event=cancel_event,
-        )
+            td = _task_dir(task_id)
+            run_storyboard_clip_generation(
+                doc,
+                settings,
+                style=style,
+                size=resolution,
+                max_segment_seconds=max_seg_eff,
+                subject_descriptions=subject_lines,
+                reference_urls=ref_images,
+                reference_video_urls=ref_videos,
+                reference_video_descriptions=ref_video_descs,
+                per_chunk_reference_filter=settings.per_chunk_reference_filter,
+                character_pool=char_pool,
+                progress_callback=log,
+                checkpoint_dir=td / "segments",
+                output_video=td / "output.mp4",
+                meta_update=lambda d: _write_task_meta(task_id, d),
+                max_workers=max_workers,
+                cancel_event=cancel_event,
+            )
 
         _write_task_meta(task_id, {"status": "done"})
         _sse_push(task_id, {"type": "status", "status": "done"})
@@ -1260,6 +1308,7 @@ def api_task_run():
             gen_params = {
                 "_owner": p.get("_owner", ""),
                 "text_only_video": p.get("text_only_video"),
+                "use_subject_refs": p.get("use_subject_refs"),
                 "reference_images": p.get("reference_images") or [],
                 "reference_videos": p.get("reference_videos") or [],
                 "reference_video_descriptions": p.get("reference_video_descriptions") or [],
@@ -1501,6 +1550,62 @@ def api_subjects_put(task_id: str):
     return jsonify({"ok": True})
 
 
+@app.route("/api/task/subjects/<task_id>/upload/<int:subject_index>", methods=["POST"])
+def api_subjects_upload_reference(task_id: str, subject_index: int):
+    """为主题任务中指定索引的角色上传参考图，写入 subjects.json。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
+    if "file" not in request.files:
+        return jsonify({"error": "缺少文件"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "文件名为空"}), 400
+    subjects = _read_subjects(task_id)
+    if subject_index < 0 or subject_index >= len(subjects):
+        return jsonify({"error": "无效的角色索引"}), 400
+    td = _task_dir(task_id)
+    ref_dir = td / "references"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(f.filename).suffix.lower() or ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+        ext = ".jpg"
+    dest = ref_dir / f"subject_{subject_index}{ext}"
+    f.save(str(dest))
+    subjects[subject_index]["reference_image_path"] = str(dest.resolve())
+    _write_subjects(task_id, subjects)
+    fname = dest.name
+    return jsonify({
+        "ok": True,
+        "filename": fname,
+        "path": str(dest.resolve()),
+        "url": f"/api/files/{task_id}/references/{fname}",
+        "subjects": subjects,
+    })
+
+
+@app.route("/api/task/subjects/<task_id>/reference/<int:subject_index>", methods=["DELETE"])
+def api_subjects_delete_reference(task_id: str, subject_index: int):
+    """移除指定角色的参考图文件并清空 subjects.json 中的路径。"""
+    username = _require_user()
+    if not _check_task_access(task_id, username):
+        return jsonify({"error": "无权限操作该任务"}), 403
+    subjects = _read_subjects(task_id)
+    if subject_index < 0 or subject_index >= len(subjects):
+        return jsonify({"error": "无效的角色索引"}), 400
+    raw_path = str(subjects[subject_index].get("reference_image_path") or "").strip()
+    if raw_path:
+        p = Path(raw_path)
+        try:
+            if p.is_file() and str(p.resolve()).startswith(str(_task_dir(task_id).resolve())):
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+    subjects[subject_index].pop("reference_image_path", None)
+    _write_subjects(task_id, subjects)
+    return jsonify({"ok": True, "subjects": subjects})
+
+
 # ---------------------------------------------------------------------------
 # 路由：LLM 翻译
 # ---------------------------------------------------------------------------
@@ -1666,6 +1771,7 @@ def api_workspace_resume(task_id: str):
         "task_id": task_id,
         "_owner": username,
         "text_only_video": body.get("text_only_video"),
+        "use_subject_refs": body.get("use_subject_refs"),
         "reference_images": body.get("reference_images") or [],
         "reference_videos": body.get("reference_videos") or [],
         "reference_video_descriptions": body.get("reference_video_descriptions") or [],
@@ -1933,6 +2039,11 @@ init_ip_blueprint(
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--port", type=int, default=8000)
+    args, _ = parser.parse_known_args()
+    _port = args.port
     try:
         import dashscope
         cfg = _get_global_config()
@@ -1978,10 +2089,10 @@ def main() -> None:
         "web ui startup",
         extra={
             "event": "web_startup",
-            "path": f"http://127.0.0.1:8000,http://{local_ip}:8000",
+            "path": f"http://127.0.0.1:{_port},http://{local_ip}:{_port}",
         },
     )
-    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=_port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

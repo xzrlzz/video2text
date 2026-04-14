@@ -239,10 +239,15 @@ def api_generate_character_images(ip_id: str):
         try:
             _deps["update_task_meta"](td, {"status": "generating"})
             settings = _deps["load_settings_for_user"](owner)
+
+            def _on_char_done(updated_profile):
+                _deps["update_task_meta"](td, {"status": "generating", "ip": updated_profile.to_dict()})
+
             ip_obj = generate_character_images(
                 ip_obj, owner, settings,
                 char_ids=params.get("char_ids"),
                 progress_cb=lambda m: _deps["sse_push"](tid, m),
+                char_done_cb=_on_char_done,
             )
             result = {
                 "status": "done",
